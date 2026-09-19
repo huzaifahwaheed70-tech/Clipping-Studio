@@ -1,0 +1,125 @@
+{
+  "app_name": "StreamClip AI - Twitch Automated Content Studio",
+  "app_type": "dashboard",
+  "theme": {
+    "default_mode": "dark",
+    "background": "#08080C",
+    "card_background": "#12121A",
+    "card_hover": "#1A1A26",
+    "border_color": "#262636",
+    "primary_purple": "#9146FF",
+    "primary_purple_hover": "#772CE8",
+    "accent_cyan": "#00F0FF",
+    "live_green": "#00E676",
+    "hype_magenta": "#FF2A85",
+    "warning_amber": "#FFB703",
+    "text_primary": "#F4F4F8",
+    "text_secondary": "#A0A0B8",
+    "text_muted": "#686880"
+  },
+  "typography": {
+    "heading_font": "Outfit, sans-serif",
+    "body_font": "Inter, sans-serif",
+    "mono_font": "JetBrains Mono, monospace",
+    "headings": {
+      "h1": "text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight font-outfit text-white",
+      "h2": "text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight text-white",
+      "h3": "text-lg sm:text-xl font-semibold text-white",
+      "card_title": "text-base font-semibold text-white"
+    },
+    "body": "text-sm text-slate-300 font-normal leading-relaxed",
+    "caption": "text-xs font-mono text-slate-400"
+  },
+  "layout_strategy": {
+    "structure": "Sidebar + Main Canvas Bento Dashboard",
+    "sidebar": "Fixed width 280px dark panel with channel list, live status badge, clips today counter, and Quick Import Twitch link bar",
+    "main_content": "Flexible scrolling bento grid with top command header (Channel Filter, Sync Status, Past VOD Puller CTA), active channel tabs, and multi-channel clip feeds",
+    "grid_modes": {
+      "channels_grid": "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6",
+      "clips_grid": "grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6",
+      "clip_card_layout": "Flex column with video/thumbnail player on top, floating caption overlay preview, chat hype spike mini-graph, AI title & hashtag badges, and quick copy CTA bar"
+    }
+  },
+  "key_features_and_components": [
+    {
+      "name": "Twitch Channel Link Manager",
+      "description": "Input bar to paste Twitch channel links or @usernames, fetching channel avatar, stream status (LIVE badge + viewer count or Offline), stream category, and daily clip quota (default 24/day)."
+    },
+    {
+      "name": "Live Status & Chat-Hype Spike Gauge",
+      "description": "Real-time stream status indicator with pulse animation for LIVE channels, real-time estimated chat activity hype level (e.g. 98% Hype Spike - Fun/Creepy Moment detected), and toggle for auto-clipping."
+    },
+    {
+      "name": "Per-Channel Section View",
+      "description": "Tabbed or stacked channel containers allowing users to view clips grouped per channel, configure individual channel settings (clips per day limit 1-100, chat spike sensitivity, prompt style)."
+    },
+    {
+      "name": "Clip Card with Caption Overlay Preview",
+      "description": "Rich clip preview with HTML5/Video player mockup, customizable animated text overlay preview (font style, position top/center/bottom, shadow, highlight colors), AI-generated viral title, formatted hashtags, clip duration, and Chat Spike timeline chart."
+    },
+    {
+      "name": "Pull-from-Past-Broadcast (VOD Engine)",
+      "description": "Action dialog allowing users to fetch past VODs/livestreams from any linked channel, set time ranges or trigger automatic chat-activity peak scanning to pull clips on demand."
+    },
+    {
+      "name": "Social Copy & Export Station",
+      "description": "One-click copy for Title + Hashtags, download high-res clip with embedded captions, or queue directly for TikTok/Reels/Shorts posting."
+    }
+  ],
+  "image_urls": [
+    {
+      "category": "gaming_setup_streamer",
+      "url": "https://images.unsplash.com/photo-1542751371-adc38448a05e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzd8MHwxfHNlYXJjaHwxfHxlc3BvcnRzJTIwc3RyZWFtZXIlMjBnYW1pbmclMjBzZXR1cCUyMGxpdmUlMjBzdHJlYW18ZW58MHx8fHwxNzg5ODU3NTc0fDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Pro gamer live streaming in RGB setup"
+    },
+    {
+      "category": "streamer_gaming_rig",
+      "url": "https://images.unsplash.com/photo-1696710257827-75e2e5954059?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzd8MHwxfHNlYXJjaHw0fHxlc3BvcnRzJTIwc3RyZWFtZXIlMjBnYW1pbmclMjBzZXR1cCUyMGxpdmUlMjBzdHJlYW18ZW58MHx8fHwxNzg5ODU3NTc0fDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Neon purple stream workstation setup"
+    },
+    {
+      "category": "streamer_monitor_view",
+      "url": "https://images.unsplash.com/photo-1626218174358-7769486c4b79?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzd8MHwxfHNlYXJjaHwyfHxlc3BvcnRzJTIwc3RyZWFtZXIlMjBnYW1pbmclMjBzZXR1cCUyMGxpdmUlMjBzdHJlYW18ZW58MHx8fHwxNzg5ODU3NTc0fDA&ixlib=rb-4.1.0&q=85",
+      "alt": "High refresh monitor streaming gameplay"
+    },
+    {
+      "category": "gamer_headset",
+      "url": "https://images.pexels.com/photos/12832570/pexels-photo-12832570.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Focused esports athlete during live broadcast"
+    },
+    {
+      "category": "female_streamer",
+      "url": "https://images.pexels.com/photos/7862594/pexels-photo-7862594.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Streamer interacting with twitch chat in real time"
+    }
+  ],
+  "data_testid_instructions": {
+    "required_attributes": [
+      "data-testid=\"add-channel-input\"",
+      "data-testid=\"add-channel-button\"",
+      "data-testid=\"channel-card-{channelId}\"",
+      "data-testid=\"live-status-badge-{channelId}\"",
+      "data-testid=\"viewer-count-{channelId}\"",
+      "data-testid=\"clip-card-{clipId}\"",
+      "data-testid=\"clip-play-button-{clipId}\"",
+      "data-testid=\"copy-title-hashtags-button-{clipId}\"",
+      "data-testid=\"caption-overlay-preview-{clipId}\"",
+      "data-testid=\"chat-hype-indicator-{clipId}\"",
+      "data-testid=\"pull-vod-button-{channelId}\"",
+      "data-testid=\"channel-clips-limit-input-{channelId}\"",
+      "data-testid=\"caption-style-toggle\"",
+      "data-testid=\"channel-tab-{channelId}\"",
+      "data-testid=\"filter-hype-moments-select\""
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Build a modern, dark gaming dashboard with Twitch purple accents (#9146FF) and electric neon status indicators.",
+    "Implement full mock data and state handling for multiple Twitch channels (e.g. xQc, KaiCenat, Tarik, Pokimane, Shroud).",
+    "Provide a channel management bar to add new channels by URL (e.g., https://twitch.tv/username) with immediate feedback.",
+    "Show LIVE / Offline indicators with animated glow badges and real-time viewer counts.",
+    "Include a per-channel clips breakdown with customizable clip limit per day (default 24), and a pull past VOD clips dialog.",
+    "Provide interactive clip cards featuring video thumbnails, simulated playback, AI GPT 5.4 titles & hashtags, and on-video caption text overlay customizer (change position, background, highlight color, font size).",
+    "Include a chat spike visualizer showing moment peaks (Hype, Laughter, Creepy moment, Insane play).",
+    "Ensure every interactive button, input, tab, and card has the exact data-testid attributes listed."
+  ]
+}
