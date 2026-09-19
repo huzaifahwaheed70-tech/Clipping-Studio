@@ -579,7 +579,11 @@ async def download_clip(clip_id: str):
         logger.warning(f"source download failed: {e}")
         raise HTTPException(502, "Could not download the source clip.")
 
-    await render_vertical(src, out, clip.get("ai_caption", ""), clip.get("caption_overlay", DEFAULT_OVERLAY), workdir)
+    try:
+        await render_vertical(src, out, clip.get("ai_caption", ""), clip.get("caption_overlay", DEFAULT_OVERLAY), workdir)
+    except Exception:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
 
     name = re.sub(r"[^a-zA-Z0-9]+", "_", (clip.get("ai_title") or clip.get("title") or "clip")).strip("_")[:50] or "clip"
     return FileResponse(

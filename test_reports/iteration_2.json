@@ -1,0 +1,23 @@
+{
+  "summary": "Targeted re-test of 9:16 render bug fix and demo-download message. Added 2 new pytest cases (demo 400 message, e2e-vertical-test full ffmpeg render + ffprobe dimension check) - both pass, ffprobe confirmed 1080x1920 output. Frontend verified: clicking download on a demo clip card fires sonner info toast ('Sample clip - add your own channel...') and does NOT navigate away to a raw JSON error page. Loader2 spinner is state-driven via `downloading` state and button is disabled during download. All 8 executed backend tests pass.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "download_clip streams the source mp4 to a temp file and only cleans up via BackgroundTask on the FileResponse; if the client disconnects before FileResponse is returned but after mkdtemp (e.g., during ffmpeg render), workdir is cleaned in the render error path via HTTPException but not in a general try/finally - consider wrapping in try/except with shutil.rmtree in finally on failure to guarantee no temp leak.",
+    "render_vertical writes caption text via drawtext textfile= but does not sanitize backslashes / single quotes - a crafted ai_caption could break the filter graph. Since caption is set by AI/user, add basic escaping or use drawtext text= with proper escapes.",
+    "clip_mp4_url only rewrites '-preview' -> '.mp4'; the e2e seed relies on a samplelib URL which happens to match. For real Twitch clip thumbnails this works, but any non-Twitch source without '-preview' returns 400 - acceptable but worth a comment."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "none (no auth)",
+  "seed_data_creation": "Reused pre-seeded e2e-vertical-test clip in Mongo (verified present). POST /api/demo/seed re-seeds 3x6 demo clips.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test file /app/backend/tests/backend_test.py now has test_download_demo_clip_returns_400 and test_download_e2e_vertical_render (requires ffprobe on runner, both are installed). e2e-vertical-test clip in Mongo points at samplelib 5s mp4; render takes ~5-10s. Frontend download of demo clips shows info toast via sonner; real clips would trigger blob download flow.",
+  "rca of the issue": "Original bug: download endpoint returned a placeholder / sample response even for real Twitch-linked clips, and produced non-9:16 output. Fix: download_clip now (a) 400s early on is_demo with a user-friendly message, (b) derives real mp4 via clip_mp4_url from thumbnail, (c) invokes render_vertical which uses ffmpeg filter_complex to build a 1080x1920 blurred-fill vertical with drawtext caption. Verified 1080x1920 via ffprobe on returned bytes."
+}

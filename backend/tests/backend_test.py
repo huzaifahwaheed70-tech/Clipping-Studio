@@ -149,6 +149,39 @@ def test_add_channel_no_twitch_configured(s):
     s.delete(f"{API}/channels/{doc['id']}")
 
 
+# ---------- Download / 9:16 render ----------
+
+def test_download_demo_clip_returns_400(s, seeded):
+    ch = seeded["channels"][0]
+    clips = s.get(f"{API}/clips", params={"channel_id": ch["id"]}).json()
+    clip = clips[0]
+    r = s.get(f"{API}/clips/{clip['id']}/download", timeout=60)
+    assert r.status_code == 400, f"expected 400 got {r.status_code}: {r.text[:200]}"
+    body = r.json()
+    detail = (body.get("detail") or "").lower()
+    assert "sample" in detail or "your own channel" in detail or "get clips" in detail, detail
+
+
+def test_download_e2e_vertical_render(s, tmp_path):
+    import subprocess, shutil as _sh
+    r = s.get(f"{API}/clips/e2e-vertical-test/download", timeout=300)
+    assert r.status_code == 200, f"got {r.status_code}: {r.text[:300]}"
+    ctype = r.headers.get("content-type", "")
+    assert ctype.startswith("video/mp4"), ctype
+    assert len(r.content) > 10_000, f"video too small: {len(r.content)} bytes"
+    out = tmp_path / "vertical.mp4"
+    out.write_bytes(r.content)
+    if _sh.which("ffprobe"):
+        p = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(out)],
+            capture_output=True, text=True, timeout=30,
+        )
+        dims = (p.stdout or "").strip()
+        print("ffprobe dims:", dims)
+        assert dims == "1080x1920", f"expected 1080x1920 got {dims}"
+
+
 # ---------- Delete flows (run last) ----------
 
 def test_zz_delete_clip_and_channel(s):
