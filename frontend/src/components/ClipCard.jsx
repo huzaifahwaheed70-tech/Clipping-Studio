@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Play, Copy, Sparkles, Eye, Clock, Check, SlidersHorizontal, Flame, Download } from "lucide-react";
+import { Play, Copy, Sparkles, Eye, Clock, Check, SlidersHorizontal, Flame, Download, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +32,7 @@ export default function ClipCard({ clip, onUpdated, index }) {
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [ov, setOv] = useState(clip.caption_overlay || {});
   const [caption, setCaption] = useState(clip.ai_caption || "");
 
@@ -72,18 +73,33 @@ export default function ClipCard({ clip, onUpdated, index }) {
     setPlaying(true);
   };
 
-  const download = () => {
-    if (clip.is_demo || !(clip.thumbnail_url || "").includes("-preview")) {
-      toast.info("Sample clip — connect Twitch to save real videos to your phone");
+  const download = async () => {
+    if (clip.is_demo) {
+      toast.info("Sample clip — add your own channel and hit 'Get clips' for real videos");
       return;
     }
-    const a = document.createElement("a");
-    a.href = `${API}/clips/${clip.id}/download`;
-    a.setAttribute("download", "");
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    toast.success("Saving video… check your Downloads / Photos");
+    setDownloading(true);
+    const tid = toast.loading("Rendering vertical 9:16 video…");
+    try {
+      const res = await fetch(`${API}/clips/${clip.id}/download`);
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.detail || "Download failed");
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${clip.channel_login}_9x16.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("Saved! Check your Downloads / Photos", { id: tid });
+    } catch (e) {
+      toast.error(e.message || "Could not download", { id: tid });
+    }
+    setDownloading(false);
   };
 
   const embedSrc = clip.embed_url
@@ -233,11 +249,12 @@ export default function ClipCard({ clip, onUpdated, index }) {
           <Button
             data-testid={`download-clip-button-${clip.id}`}
             onClick={download}
+            disabled={downloading}
             variant="outline"
             className="h-9 w-9 p-0 bg-transparent border-[#262636] text-[#A0A0B8] hover:text-[#00E676] hover:bg-[#1A1A26]"
-            title="Save video to phone"
+            title="Save 9:16 video to phone"
           >
-            <Download className="h-4 w-4" />
+            {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
           </Button>
           <Button
             data-testid={`caption-style-toggle`}

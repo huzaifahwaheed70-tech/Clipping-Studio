@@ -2,8 +2,10 @@ import os
 import re
 import json
 import uuid
+import shutil
 import asyncio
 import logging
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -11,7 +13,8 @@ import httpx
 import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, HTTPException, Query
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse, FileResponse
+from starlette.background import BackgroundTask
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -485,38 +488,105 @@ def clip_mp4_url(thumbnail_url: str) -> str | None:
     return thumbnail_url.split("-preview")[0] + ".mp4"
 
 
+FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+
+def _drawtext_y(position: str) -> str:
+    if position == "top":
+        return "150"
+    if position == "center":
+        return "(H-text_h)/2"
+    return "H-text_h-200"  # bottom
+
+
+async def render_vertical(src: str, out: str, caption: str, overlay: dict, workdir: str):
+    """Convert a 16:9 clip to a 1080x1920 (9:16) video with a blurred fill and burned-in caption."""
+    # blurred background + centered clip
+    fc = (
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=32:12,setsar=1[bg];"
+        "[0:v]scale=1080:-2:force_original_aspect_ratio=decrease[fg];"
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2[v1]"
+    )
+    out_label = "[v1]"
+    cap = (caption or "").strip()
+    if cap and os.path.exists(FONT_PATH):
+        cap_file = os.path.join(workdir, "caption.txt")
+        with open(cap_file, "w") as f:
+            f.write(cap.upper())
+        size = int(overlay.get("font_size", 28) or 28)
+        fontsize = max(48, min(120, int(size * 2.6)))
+        y = _drawtext_y(overlay.get("position", "bottom"))
+        highlight = overlay.get("highlight", "#9146FF").lstrip("#")
+        fc += (
+            f";[v1]drawtext=textfile={cap_file}:fontfile={FONT_PATH}:"
+            f"fontcolor=white:fontsize={fontsize}:line_spacing=10:"
+            f"box=1:boxcolor=black@0.55:boxborderw=26:"
+            f"bordercolor=0x{highlight}@0.9:borderw=4:"
+            f"x=(w-text_w)/2:y={y}[vout]"
+        )
+        out_label = "[vout]"
+
+    args = [
+        "ffmpeg", "-y", "-i", src,
+        "-filter_complex", fc,
+        "-map", out_label, "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:a", "aac", "-b:a", "160k",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        out,
+    ]
+    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(504, "Rendering the vertical video took too long. Try a shorter clip.")
+    if proc.returncode != 0:
+        logger.warning(f"ffmpeg failed: {stderr.decode()[-500:]}")
+        raise HTTPException(500, "Could not render the vertical video.")
+
+
 @api.get("/clips/{clip_id}/download")
 async def download_clip(clip_id: str):
     clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
     if not clip:
         raise HTTPException(404, "Clip not found")
     if clip.get("is_demo"):
-        raise HTTPException(400, "This is a sample clip. Connect Twitch to pull real, downloadable videos.")
+        raise HTTPException(400, "This is a sample clip. Add your own channel and hit 'Get clips' to pull real, downloadable videos.")
     mp4 = clip_mp4_url(clip.get("thumbnail_url", ""))
     if not mp4:
         raise HTTPException(400, "No downloadable video is available for this clip.")
 
-    local = httpx.AsyncClient(timeout=None, follow_redirects=True)
-    resp = await local.send(local.build_request("GET", mp4), stream=True)
-    if resp.status_code != 200:
-        await resp.aclose()
-        await local.aclose()
-        raise HTTPException(404, "The video file could not be fetched from Twitch.")
+    workdir = tempfile.mkdtemp(prefix="clip_")
+    src = os.path.join(workdir, "src.mp4")
+    out = os.path.join(workdir, "vertical.mp4")
+
+    # download source
+    try:
+        async with httpx.AsyncClient(timeout=None, follow_redirects=True) as c:
+            async with c.stream("GET", mp4) as r:
+                if r.status_code != 200:
+                    shutil.rmtree(workdir, ignore_errors=True)
+                    raise HTTPException(404, "The video file could not be fetched from Twitch.")
+                with open(src, "wb") as f:
+                    async for chunk in r.aiter_bytes():
+                        f.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        logger.warning(f"source download failed: {e}")
+        raise HTTPException(502, "Could not download the source clip.")
+
+    await render_vertical(src, out, clip.get("ai_caption", ""), clip.get("caption_overlay", DEFAULT_OVERLAY), workdir)
 
     name = re.sub(r"[^a-zA-Z0-9]+", "_", (clip.get("ai_title") or clip.get("title") or "clip")).strip("_")[:50] or "clip"
-
-    async def gen():
-        try:
-            async for chunk in resp.aiter_bytes():
-                yield chunk
-        finally:
-            await resp.aclose()
-            await local.aclose()
-
-    return StreamingResponse(
-        gen(),
+    return FileResponse(
+        out,
         media_type="video/mp4",
-        headers={"Content-Disposition": f'attachment; filename="{name}.mp4"'},
+        filename=f"{name}_9x16.mp4",
+        background=BackgroundTask(shutil.rmtree, workdir, ignore_errors=True),
     )
 
 
