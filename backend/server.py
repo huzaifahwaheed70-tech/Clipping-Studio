@@ -11,7 +11,7 @@ import httpx
 import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -476,6 +476,48 @@ async def update_clip(clip_id: str, body: ClipUpdate):
 async def delete_clip(clip_id: str):
     await db.clips.delete_one({"id": clip_id})
     return {"ok": True}
+
+
+def clip_mp4_url(thumbnail_url: str) -> str | None:
+    """Derive the direct high-quality MP4 from a Twitch clip thumbnail URL."""
+    if not thumbnail_url or "-preview" not in thumbnail_url:
+        return None
+    return thumbnail_url.split("-preview")[0] + ".mp4"
+
+
+@api.get("/clips/{clip_id}/download")
+async def download_clip(clip_id: str):
+    clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
+    if not clip:
+        raise HTTPException(404, "Clip not found")
+    if clip.get("is_demo"):
+        raise HTTPException(400, "This is a sample clip. Connect Twitch to pull real, downloadable videos.")
+    mp4 = clip_mp4_url(clip.get("thumbnail_url", ""))
+    if not mp4:
+        raise HTTPException(400, "No downloadable video is available for this clip.")
+
+    local = httpx.AsyncClient(timeout=None, follow_redirects=True)
+    resp = await local.send(local.build_request("GET", mp4), stream=True)
+    if resp.status_code != 200:
+        await resp.aclose()
+        await local.aclose()
+        raise HTTPException(404, "The video file could not be fetched from Twitch.")
+
+    name = re.sub(r"[^a-zA-Z0-9]+", "_", (clip.get("ai_title") or clip.get("title") or "clip")).strip("_")[:50] or "clip"
+
+    async def gen():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await resp.aclose()
+            await local.aclose()
+
+    return StreamingResponse(
+        gen(),
+        media_type="video/mp4",
+        headers={"Content-Disposition": f'attachment; filename="{name}.mp4"'},
+    )
 
 
 # -------- OAuth (create-clip capability) --------

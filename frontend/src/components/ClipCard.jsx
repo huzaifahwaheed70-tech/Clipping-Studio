@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Play, Copy, Sparkles, Eye, Clock, Check, SlidersHorizontal, Flame } from "lucide-react";
+import { Play, Copy, Sparkles, Eye, Clock, Check, SlidersHorizontal, Flame, Download } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -9,7 +9,7 @@ import { Slider } from "@/components/ui/slider";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { api } from "@/lib/api";
+import { api, API } from "@/lib/api";
 
 const HYPE_COLOR = {
   "Hype Spike": "#FF2A85",
@@ -70,6 +70,20 @@ export default function ClipCard({ clip, onUpdated, index }) {
       return;
     }
     setPlaying(true);
+  };
+
+  const download = () => {
+    if (clip.is_demo || !(clip.thumbnail_url || "").includes("-preview")) {
+      toast.info("Sample clip — connect Twitch to save real videos to your phone");
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = `${API}/clips/${clip.id}/download`;
+    a.setAttribute("download", "");
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast.success("Saving video… check your Downloads / Photos");
   };
 
   const embedSrc = clip.embed_url
@@ -215,6 +229,15 @@ export default function ClipCard({ clip, onUpdated, index }) {
           >
             {copied ? <Check className="h-4 w-4 mr-1.5" /> : <Copy className="h-4 w-4 mr-1.5" />}
             {copied ? "Copied" : "Copy for posting"}
+          </Button>
+          <Button
+            data-testid={`download-clip-button-${clip.id}`}
+            onClick={download}
+            variant="outline"
+            className="h-9 w-9 p-0 bg-transparent border-[#262636] text-[#A0A0B8] hover:text-[#00E676] hover:bg-[#1A1A26]"
+            title="Save video to phone"
+          >
+            <Download className="h-4 w-4" />
           </Button>
           <Button
             data-testid={`caption-style-toggle`}
