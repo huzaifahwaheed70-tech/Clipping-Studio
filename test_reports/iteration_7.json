@@ -1,0 +1,22 @@
+{
+  "summary": "Re-tested StreamClip AI after rebuild (no Twitch creds — public GQL; on-demand 9:16 render via GET /api/clips/{id}/video). Backend: 18/18 pytest pass. Cred-free add: POST /api/channels {url:'twitch.tv/summit1g'} -> 200 with display_name='Summit1g', avatar_url resolved via GQL, twitch_user_id populated, and background auto-fetch produced 6 clips within ~15s each having ai_title/ai_hashtags(list of #-prefixed)/ai_caption/view_count/hype_type. Core save endpoint: GET /api/clips/{shroud clip id}/video -> HTTP 200, content-type video/mp4, Content-Length header EQUALS len(body) (Cloudflare parse fix confirmed), ffprobe reports 1080x1920. Demo clip video -> 400 friendly (contains 'sample'). Unknown clip -> 404. Regression: seed/list channels/clips filter/get single/regenerate/patch clip/patch channel/settings/live/download-jobs 400+404 all pass. Frontend: shroud channel selected -> 34 clip cards. Each real card has: green <a data-testid=download-clip-button-{id}> whose href points to /api/clips/{id}/video with download attr set to '{login}_9x16.mp4', a share icon button data-testid=share-clip-button-{id}, and an icon-only copy button data-testid=copy-title-hashtags-button-{id} that copies 'title\\n\\nhashtags' to clipboard. Demo (xqc) cards show a Sample <button> with same testid that only fires an info toast — no share button rendered.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py get_clip_video reads entire file into memory and returns Response with explicit Content-Length — correct fix for Cloudflare parse error and matches manual verification. For future scale, consider StreamingResponse with pre-computed Content-Length once files grow >5MB.",
+    "add_channel spawns asyncio.create_task(auto_pull_channel(...)) but is not tracked; if the worker restarts mid-pull the channel is left with 0 clips (user must PATCH+sync). Consider persisting a 'fetch_status' to enable retry on startup.",
+    "ClipCard.jsx: <a href={videoUrl} download> is the perfect fix — browser handles Content-Length + streaming so this cannot hit the empty-response Cloudflare bug. Share button correctly falls back to <a download> when navigator.canShare({files}) is false.",
+    "Minor: server.py still exposes /clips/{id}/download-jobs and /download-jobs/{id}/file legacy endpoints. If they are no longer used by the UI, consider removing to reduce surface area (they currently work and pass tests)."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (18/18)", "frontend": "100% (all flows verified)"},
+  "seed_data_creation": "POST /api/demo/seed left 3 demo channels x 6 clips. summit1g channel added then deleted during test. shroud (pre-seeded, is_demo=False, 34 clips, several with render_status=done) preserved.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "shroud is the real pre-seeded channel with is_demo=False and multiple already-rendered clips (render_status='done'), so /api/clips/{id}/video returns quickly (<2s) using cached file. Fresh render on unrendered clip takes ~29-36s. Keep concurrent /video calls to 1 (RENDER_SEM=3 in server). Public GQL client-id is embedded in server.py — no creds needed."
+}
