@@ -528,7 +528,7 @@ async def _make_poster(video_path: str, out: str):
 
 async def _store_vod_clips(ch: dict, vods: list, need: int):
     if need <= 0:
-        need = ch.get("clips_per_day", 24)
+        need = ch.get("clips_per_day", 20)
     out = []
     ai_sem = asyncio.Semaphore(4)
     usable = [v for v in vods if v["length"] > 180][:3] or vods[:3]
@@ -703,7 +703,7 @@ async def add_channel(body: ChannelCreate):
         "twitch_user_id": user.get("id"),
         "avatar_url": user.get("profileImageURL") or "",
         "description": user.get("description") or "",
-        "clips_per_day": 24,
+        "clips_per_day": 20,
         "auto_clip": True,
         "caption_overlay": dict(DEFAULT_OVERLAY),
         "is_demo": False,
@@ -814,7 +814,7 @@ async def auto_pull_channel(ch: dict, period: str = None):
     """Record the channel's best moments from its past broadcasts (credential-free).
     Rendering to 9:16 happens in the background so Save is instant."""
     try:
-        limit = ch.get("clips_per_day", 24)
+        limit = ch.get("clips_per_day", 20)
         existing = await db.clips.count_documents({"channel_id": ch["id"]})
         if existing >= limit:
             return []
@@ -840,7 +840,7 @@ async def sync_clips(channel_id: str, body: SyncRequest):
         raise HTTPException(502, "Couldn't reach Twitch right now. Try again in a moment.")
     if not vods:
         raise HTTPException(404, f"{ch.get('display_name') or ch['login']} has no past broadcasts available to clip from. Twitch only keeps VODs for a limited time.")
-    limit = ch.get("clips_per_day", 24)
+    limit = ch.get("clips_per_day", 20)
     existing = await db.clips.count_documents({"channel_id": channel_id})
     need = max(limit - existing, limit)
     stored = await _store_vod_clips(ch, vods, need)
@@ -869,7 +869,7 @@ async def pull_vod(channel_id: str, days: int = Query(30)):
         raise HTTPException(502, "Couldn't reach Twitch right now. Try again in a moment.")
     if not vods:
         raise HTTPException(404, f"{ch.get('display_name') or ch['login']} has no past broadcasts available to clip from.")
-    limit = ch.get("clips_per_day", 24)
+    limit = ch.get("clips_per_day", 20)
     stored = await _store_vod_clips(ch, vods, limit)
     return {"fetched": len(vods), "stored": len(stored), "clips": stored}
 
@@ -1055,7 +1055,7 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
 
 RENDER_DIR = "/tmp/renders"
 os.makedirs(RENDER_DIR, exist_ok=True)
-RENDER_SEM = asyncio.Semaphore(1)
+RENDER_SEM = asyncio.Semaphore(3)
 
 
 async def render_clip_to_store(clip_id: str):
@@ -1320,7 +1320,7 @@ async def seed_demo():
             "twitch_user_id": None,
             "avatar_url": DEMO_IMAGES[i % len(DEMO_IMAGES)],
             "description": "Demo channel with sample clips.",
-            "clips_per_day": 24,
+            "clips_per_day": 20,
             "auto_clip": True,
             "caption_overlay": dict(DEFAULT_OVERLAY),
             "is_demo": True,
@@ -1380,15 +1380,15 @@ async def auto_sync_loop():
 
 async def render_worker():
     """Continuously pre-render pending clips to 9:16 in the background so every card is
-    already 'Save video' by the time the user looks. Renders ONE at a time via RENDER_SEM,
-    at `nice -n 19` with a single ffmpeg thread, so the web server always stays responsive."""
+    already 'Save video' by the time the user looks. Renders up to RENDER_SEM concurrently,
+    each at `nice -n 19` with a single ffmpeg thread, so the web server stays responsive."""
     await asyncio.sleep(15)
     while True:
         try:
             clip = await db.clips.find_one(
                 {"is_demo": {"$ne": True}, "render_status": "pending"}, {"_id": 0})
             if clip:
-                await render_clip_to_store(clip["id"])
+                asyncio.create_task(render_clip_to_store(clip["id"]))
                 await asyncio.sleep(1)
             else:
                 await asyncio.sleep(8)
