@@ -149,28 +149,54 @@ def test_add_channel_no_twitch_configured(s):
     s.delete(f"{API}/channels/{doc['id']}")
 
 
-# ---------- Download / 9:16 render ----------
+# ---------- Download job flow / 9:16 render (async) ----------
 
-def test_download_demo_clip_returns_400(s, seeded):
+def test_download_demo_clip_job_returns_400(s, seeded):
     ch = seeded["channels"][0]
     clips = s.get(f"{API}/clips", params={"channel_id": ch["id"]}).json()
     clip = clips[0]
-    r = s.get(f"{API}/clips/{clip['id']}/download", timeout=60)
+    r = s.post(f"{API}/clips/{clip['id']}/download-jobs", timeout=30)
     assert r.status_code == 400, f"expected 400 got {r.status_code}: {r.text[:200]}"
     body = r.json()
     detail = (body.get("detail") or "").lower()
     assert "sample" in detail or "your own channel" in detail or "get clips" in detail, detail
 
 
-def test_download_e2e_real_vertical_render(s, tmp_path):
-    import subprocess, shutil as _sh
-    r = s.get(f"{API}/clips/e2e-real/download", timeout=300)
+def test_download_job_unknown_returns_404(s):
+    r = s.get(f"{API}/download-jobs/does-not-exist-xyz", timeout=15)
+    assert r.status_code == 404
+
+
+def test_download_e2e_real_job_flow(s, tmp_path):
+    import time, subprocess, shutil as _sh
+    # 1) Kick off job
+    r = s.post(f"{API}/clips/e2e-real/download-jobs", timeout=30)
     assert r.status_code == 200, f"got {r.status_code}: {r.text[:300]}"
-    ctype = r.headers.get("content-type", "")
+    job_id = r.json().get("job_id")
+    assert isinstance(job_id, str) and len(job_id) > 0
+
+    # 2) Poll status (each request short — no 502 possible)
+    status = "processing"
+    deadline = time.time() + 180
+    last = None
+    while time.time() < deadline:
+        pr = s.get(f"{API}/download-jobs/{job_id}", timeout=15)
+        assert pr.status_code == 200, f"poll status {pr.status_code}: {pr.text[:200]}"
+        last = pr.json()
+        status = last.get("status")
+        if status in ("done", "error"):
+            break
+        time.sleep(2)
+    assert status == "done", f"job did not complete cleanly: {last}"
+
+    # 3) Fetch file
+    fr = s.get(f"{API}/download-jobs/{job_id}/file", timeout=60)
+    assert fr.status_code == 200, f"file endpoint {fr.status_code}: {fr.text[:200]}"
+    ctype = fr.headers.get("content-type", "")
     assert ctype.startswith("video/mp4"), ctype
-    assert len(r.content) > 10_000, f"video too small: {len(r.content)} bytes"
+    assert len(fr.content) > 10_000, f"video too small: {len(fr.content)} bytes"
     out = tmp_path / "vertical.mp4"
-    out.write_bytes(r.content)
+    out.write_bytes(fr.content)
     if _sh.which("ffprobe"):
         p = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",

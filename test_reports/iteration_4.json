@@ -1,0 +1,34 @@
+{
+  "summary": "Re-tested StreamClip AI after switch to async job model for real-clip download. All 16 backend pytest tests PASS via the EXTERNAL REACT_APP_BACKEND_URL (no 502). Full e2e-real flow: POST /api/clips/e2e-real/download-jobs -> 200 {job_id}; poll GET /api/download-jobs/{job_id} completes with status=='done' well within ~30s; GET /api/download-jobs/{job_id}/file -> HTTP 200 content-type video/mp4; ffprobe confirms 1080x1920. Demo clip POST /api/clips/{demoId}/download-jobs -> 400 with friendly 'sample clip' message. Unknown job id GET /api/download-jobs/xxx -> 404. Regression: /api/demo/seed (3 channels x 6 clips), /api/channels, /api/clips (all + filtered), /api/clips/{id}/generate (real GPT), PATCH /clips, PATCH /channels, /channels/{id}/live for demo, /channels/{id}/sync for demo -> 400, delete cascade — all pass. Frontend: clicking the download button on a demo clip (data-testid=download-clip-button-<id>) shows the sonner info toast 'Sample clip — add your own channel and hit \"Get clips\" for real videos' and does NOT navigate away from the Clip Studio page. Loader2 spinner + disabled state is wired via the `downloading` state.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "render_vertical()", "issue": "drawtext uses textfile= with raw upper-cased caption; special ffmpeg-drawtext control chars (\\, %, {) could still confuse the filter. `expansion=none` already helps a lot; low-risk but sanitizing is safer."},
+      {"endpoint": "_run_render_job()", "issue": "workdir is cleaned in finally (good), but the finished output at /tmp/renders/{job_id}.mp4 only gets pruned when a NEW job triggers _prune_old_renders(); an idle system will keep old files >2h. Consider a periodic sweeper or unlink after FileResponse."},
+      {"endpoint": "GET /download-jobs/{id}/file", "issue": "Returns 404 for both 'unknown job' AND 'not-yet-ready job'; consider 202/425 for the not-ready case to disambiguate."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now ~830 lines and mixes AI, ffmpeg render, GQL resolution, OAuth, demo seed, auto-sync loop, and HTTP routes — should be split into modules (routes/, services/twitch.py, services/render.py, services/ai.py) for maintainability.",
+    "Render jobs are stored in Mongo but the actual mp4 file lives on ephemeral /tmp; if the pod restarts between job creation and file fetch the client polls 'done' forever after the row is orphaned. Consider clearing status back to 'error' at startup for any 'processing' rows and/or verifying file existence in the poll response.",
+    "Frontend polling loop in ClipCard.download() has no AbortController; if the user navigates away the setTimeout chain keeps running. Minor leak."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% for demo-toast / no-navigate check"},
+  "test_credentials": "none (no auth); e2e-real clip already seeded (slug GleamingWildCougarFUNgineer, is_demo=False)",
+  "seed_data_creation": "POST /api/demo/seed re-seeds 3 demo channels x 6 clips; e2e-real preserved",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "The 60s ingress 502 from iteration 3 is FULLY RESOLVED by the async job model. Each individual HTTP hop is short (<3s). The core fix is verified end-to-end against the EXTERNAL preview URL. Only minor code-quality/UX polish items remain (see minor issues). Use /app/backend/tests/backend_test.py as regression.",
+  "rca of the issue": "Previous 502 root cause was the single-shot GET /clips/{id}/download taking ~55-60s wall clock (GQL resolve + CloudFront fetch + libx264 encode + heavy boxblur) which tripped the Cloudflare edge idle-timeout. Fix: replaced the sync endpoint with three short endpoints — POST creates a background asyncio task and returns a job_id instantly, GET polls status from Mongo, GET file streams the finished mp4 via FileResponse. Also ffmpeg is now `-preset ultrafast` with a cheap downscale-then-boxblur trick so the total async work is ~20-25s, comfortably under any edge timeout."
+}
