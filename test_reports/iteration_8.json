@@ -1,0 +1,23 @@
+{
+  "summary": "Verified the CPU-starvation fix (nice -n 19, -threads 1, RENDER_SEM=1, load-aware render_worker). Added test_responsiveness_during_render that fires a real ffmpeg render in a background thread against a timthetatman pending clip, then hammers GET /api/, GET /api/channels and POST /api/channels {url:'twitch.tv/shroud'} three times WHILE the render runs. Observed timings: GET /api/ 0.13-0.15s, GET /api/channels 0.12-0.14s, POST /api/channels 0.11-0.31s — all well under 5s, all status<500 (no 5xx / Cloudflare empty response). The background render itself also completed successfully (HTTP 200, 7.6MB mp4) proving serialization+throttling doesn't break rendering. All 19 pytest cases pass (regression + core fix). Frontend loaded via REACT_APP_BACKEND_URL, timthetatman selected -> 24 ClipCards render; 21 show 'Preparing…' spinner (matches pending render_status count), 'done' clips show green 'Save video' <a data-testid=download-clip-button-{id}> with correct href /api/clips/{id}/video. ADD-CHANNEL (no creds) POST /api/channels {url:'twitch.tv/summit1g'} returns 200 with display_name+avatar_url+twitch_user_id and background auto_pull produces AI-enriched clips within ~45s. Invalid handle returns 404 quickly (<1s). Demo clip video -> 400 friendly ('sample'). Unknown clip -> 404. Instant save on already-rendered clip works. This confirms the root-cause fix — ffmpeg no longer starves uvicorn.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py render_vertical: `nice -n 19` + `-threads 1` + RENDER_SEM(1) is the correct fix. Verified with live test — API responsiveness stays <500ms even during active ffmpeg render on 2-core pod.",
+    "render_worker uses os.getloadavg()[0] > 1.5 threshold. Reasonable for 2-core pod, but this is a *host* load average, which in containers can be misleading (reports host load, not container's own). If the pod is on a busy node with idle-in-container CPU, the worker will incorrectly back off. Consider tracking an internal in-flight counter instead.",
+    "get_clip_video still reads the whole file into memory (7.6MB observed). Fine for current clip sizes; if renders ever exceed ~50MB, memory pressure could spike. StreamingResponse with pre-computed Content-Length would be safer.",
+    "render_clip_to_store swallows exceptions and marks render_status='error' with no error message stored — hard to debug user-reported failures. Consider persisting last_error.",
+    "auto_pull_channel spawned via untracked asyncio.create_task on add_channel; if worker restarts mid-pull the channel is stuck with 0 clips (unchanged from prior iteration)."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "100% (rendered flows verified)"},
+  "seed_data_creation": "POST /api/demo/seed keeps xqc/kaicenat/pokimane demo channels. timthetatman real channel is pre-seeded with 24 clips (1 done, 23 pending). summit1g and shroud added+deleted during tests.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The CORE fix under review is CPU-starvation. Test only ONE /video render at a time — RENDER_SEM=1 enforces this. timthetatman is the real pre-seeded channel; use it for on-demand render tests. Measured render duration on 2-core pod at nice19/thread1 = ~15-25s for a short clip. Lightweight endpoints stay <500ms during active render — this is the KEY assertion to preserve."
+}
