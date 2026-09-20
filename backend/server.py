@@ -13,7 +13,7 @@ import httpx
 import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, HTTPException, Query
-from fastapi.responses import RedirectResponse, StreamingResponse, FileResponse
+from fastapi.responses import RedirectResponse, StreamingResponse, FileResponse, Response
 from starlette.background import BackgroundTask
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -704,7 +704,18 @@ async def get_download_job_file(job_id: str):
         raise HTTPException(404, "File not ready")
     clip = await db.clips.find_one({"id": j["clip_id"]}, {"_id": 0}) or {}
     name = re.sub(r"[^a-zA-Z0-9]+", "_", (clip.get("ai_title") or clip.get("title") or "clip")).strip("_")[:50] or "clip"
-    return FileResponse(j["file"], media_type="video/mp4", filename=f"{name}_9x16.mp4")
+    with open(j["file"], "rb") as f:
+        data = f.read()
+    return Response(
+        content=data,
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}_9x16.mp4"',
+            "Content-Length": str(len(data)),
+            "Cache-Control": "no-store",
+            "Accept-Ranges": "none",
+        },
+    )
 
 
 # -------- OAuth (create-clip capability) --------

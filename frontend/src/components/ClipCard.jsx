@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { motion } from "framer-motion";
-import { Play, Copy, Sparkles, Eye, Clock, Check, SlidersHorizontal, Flame, Download, Loader2 } from "lucide-react";
+import { Play, Copy, Sparkles, Eye, Clock, Check, SlidersHorizontal, Flame, Download, Loader2, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -32,7 +32,8 @@ export default function ClipCard({ clip, onUpdated, index }) {
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [playing, setPlaying] = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [phase, setPhase] = useState("idle"); // idle | rendering | ready
+  const fileRef = useRef(null);
   const [ov, setOv] = useState(clip.caption_overlay || {});
   const [caption, setCaption] = useState(clip.ai_caption || "");
 
@@ -73,13 +74,13 @@ export default function ClipCard({ clip, onUpdated, index }) {
     setPlaying(true);
   };
 
-  const download = async () => {
+  const runRender = async () => {
     if (clip.is_demo) {
       toast.info("Sample clip — add your own channel and hit 'Get clips' for real videos");
       return;
     }
-    setDownloading(true);
-    const tid = toast.loading("Rendering vertical 9:16 video… this can take up to a minute");
+    setPhase("rendering");
+    const tid = toast.loading("Making your 9:16 clip… up to a minute");
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     try {
       const { job_id } = await api.createDownloadJob(clip.id);
@@ -97,19 +98,49 @@ export default function ClipCard({ clip, onUpdated, index }) {
       const res = await fetch(`${API}/download-jobs/${job_id}/file`);
       if (!res.ok) throw new Error("Rendered file was not ready");
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${clip.channel_login}_9x16.mp4`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      toast.success("Saved! Check your Downloads / Photos", { id: tid });
+      const fname = `${clip.channel_login || "clip"}_9x16.mp4`;
+      fileRef.current = new File([blob], fname, { type: "video/mp4" });
+      setPhase("ready");
+      toast.success("Ready! Tap the green button to Save / Share", { id: tid });
     } catch (e) {
-      toast.error(e?.response?.data?.detail || e.message || "Could not download", { id: tid });
+      setPhase("idle");
+      toast.error(e?.response?.data?.detail || e.message || "Could not render", { id: tid });
     }
-    setDownloading(false);
+  };
+
+  const shareOrSave = async () => {
+    const file = fileRef.current;
+    if (!file) {
+      runRender();
+      return;
+    }
+    const text = `${clip.ai_title}\n${(clip.ai_hashtags || []).join(" ")}`;
+    // Native share sheet (mobile) — must run inside this tap
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: clip.ai_title, text });
+        toast.success("Choose 'Save Video' to add it to your Photos");
+        return;
+      } catch (err) {
+        if (err && err.name === "AbortError") return; // user cancelled
+        // otherwise fall through to direct download
+      }
+    }
+    // Desktop / unsupported fallback: direct download
+    const url = URL.createObjectURL(file);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast.success("Saved! Check your Downloads / Photos");
+  };
+
+  const onDownloadClick = () => {
+    if (phase === "ready") shareOrSave();
+    else if (phase === "idle") runRender();
   };
 
   const embedSrc = clip.embed_url
@@ -258,13 +289,25 @@ export default function ClipCard({ clip, onUpdated, index }) {
           </Button>
           <Button
             data-testid={`download-clip-button-${clip.id}`}
-            onClick={download}
-            disabled={downloading}
-            variant="outline"
-            className="h-9 w-9 p-0 bg-transparent border-[#262636] text-[#A0A0B8] hover:text-[#00E676] hover:bg-[#1A1A26]"
-            title="Save 9:16 video to phone"
+            onClick={onDownloadClick}
+            disabled={phase === "rendering"}
+            variant={phase === "ready" ? "default" : "outline"}
+            className={
+              phase === "ready"
+                ? "flex-1 h-9 bg-[#00E676] hover:bg-[#00c765] text-black text-xs font-bold animate-pulse"
+                : "h-9 w-9 p-0 bg-transparent border-[#262636] text-[#A0A0B8] hover:text-[#00E676] hover:bg-[#1A1A26]"
+            }
+            title={phase === "ready" ? "Open your phone's Save / Share menu" : "Make 9:16 clip"}
           >
-            {downloading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+            {phase === "rendering" ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : phase === "ready" ? (
+              <>
+                <Share2 className="h-4 w-4 mr-1.5" /> Save / Share
+              </>
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
           </Button>
           <Button
             data-testid={`caption-style-toggle`}
