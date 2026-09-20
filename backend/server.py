@@ -734,7 +734,7 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
 
 RENDER_DIR = "/tmp/renders"
 os.makedirs(RENDER_DIR, exist_ok=True)
-RENDER_SEM = asyncio.Semaphore(3)
+RENDER_SEM = asyncio.Semaphore(2)
 
 
 async def render_clip_to_store(clip_id: str):
@@ -1007,12 +1007,39 @@ async def auto_sync_loop():
         await asyncio.sleep(900)  # every 15 minutes
 
 
+async def render_worker():
+    """Gently pre-render pending clips to 9:16 in the background, ONE at a time,
+    so tapping Save is instant — without overloading the server."""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            clip = await db.clips.find_one(
+                {"is_demo": {"$ne": True}, "render_status": "pending"}, {"_id": 0})
+            if clip:
+                await render_clip_to_store(clip["id"])
+                await asyncio.sleep(2)  # throttle between renders
+            else:
+                await asyncio.sleep(8)
+        except Exception as e:
+            logger.warning(f"render_worker: {e}")
+            await asyncio.sleep(10)
+
+
 @app.on_event("startup")
 async def on_startup():
     await restore_from_disk()
     await db.channels.create_index("login")
     await db.clips.create_index("twitch_clip_id")
+    # reconcile render state after a restart: unstick 'rendering' and re-queue clips whose file is gone
+    await db.clips.update_many({"render_status": "rendering"}, {"$set": {"render_status": "pending"}})
+    done = await db.clips.find({"is_demo": {"$ne": True}, "render_status": "done"},
+                               {"id": 1, "render_file": 1}).to_list(3000)
+    for c in done:
+        if not c.get("render_file") or not os.path.exists(c["render_file"]):
+            await db.clips.update_one({"id": c["id"]},
+                                      {"$set": {"render_status": "pending", "rendered": False, "render_file": None}})
     asyncio.create_task(auto_sync_loop())
+    asyncio.create_task(render_worker())
 
 
 app.include_router(api)

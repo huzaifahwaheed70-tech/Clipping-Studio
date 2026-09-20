@@ -271,11 +271,16 @@ export default function ClipCard({ clip, onUpdated, index }) {
                 data-testid={`download-clip-button-${clip.id}`}
                 href={videoUrl}
                 download={`${clip.channel_login || "clip"}_9x16.mp4`}
-                className="flex-1 h-9 rounded-md bg-[#00E676] hover:bg-[#00c765] text-black text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors"
-                title="Save the 9:16 video to your device"
-                onClick={() => toast.message(rendered ? "Saving your 9:16 video…" : "Making your 9:16 clip, this can take a few seconds…")}
+                className={`flex-1 h-9 rounded-md text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors ${
+                  rendered
+                    ? "bg-[#00E676] hover:bg-[#00c765] text-black"
+                    : "bg-[#00E676]/25 hover:bg-[#00E676]/40 text-[#00E676]"
+                }`}
+                title={rendered ? "Save the 9:16 video (ready)" : "Preparing 9:16… tap to save now"}
+                onClick={() => toast.message(rendered ? "Saving your 9:16 video…" : "Making your 9:16 clip, a few seconds…")}
               >
-                <Download className="h-4 w-4" /> Save video
+                {rendered ? <Download className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
+                {rendered ? "Save video" : "Preparing…"}
               </a>
               <Button
                 data-testid={`share-clip-button-${clip.id}`}
