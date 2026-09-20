@@ -482,10 +482,41 @@ async def delete_clip(clip_id: str):
 
 
 def clip_mp4_url(thumbnail_url: str) -> str | None:
-    """Derive the direct high-quality MP4 from a Twitch clip thumbnail URL."""
+    """Fallback: derive the MP4 from an older-format Twitch clip thumbnail URL."""
     if not thumbnail_url or "-preview" not in thumbnail_url:
         return None
     return thumbnail_url.split("-preview")[0] + ".mp4"
+
+
+GQL_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+GQL_CLIP_HASH = "36b89d2507fce29e5ca551df756d27c1cfe079e2609642b4390aa4c35796eb11"
+
+
+async def resolve_clip_source(slug: str) -> str | None:
+    """Resolve a Twitch clip's highest-quality downloadable MP4 URL via the public GQL API."""
+    if not slug or slug.startswith("demo"):
+        return None
+    from urllib.parse import quote
+    body = [{
+        "operationName": "VideoAccessToken_Clip",
+        "variables": {"slug": slug},
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": GQL_CLIP_HASH}},
+    }]
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post("https://gql.twitch.tv/gql", json=body, headers={"Client-ID": GQL_CLIENT_ID})
+        if r.status_code != 200:
+            return None
+        clip = r.json()[0]["data"]["clip"]
+        if not clip or not clip.get("videoQualities"):
+            return None
+        qualities = sorted(clip["videoQualities"], key=lambda q: int(q.get("quality", "0")), reverse=True)
+        token = clip["playbackAccessToken"]
+        src = qualities[0]["sourceURL"]
+        return f"{src}?sig={token['signature']}&token={quote(token['value'])}"
+    except Exception as e:
+        logger.warning(f"GQL clip resolve failed for {slug}: {e}")
+        return None
 
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
@@ -554,9 +585,11 @@ async def download_clip(clip_id: str):
         raise HTTPException(404, "Clip not found")
     if clip.get("is_demo"):
         raise HTTPException(400, "This is a sample clip. Add your own channel and hit 'Get clips' to pull real, downloadable videos.")
-    mp4 = clip_mp4_url(clip.get("thumbnail_url", ""))
+    mp4 = await resolve_clip_source(clip.get("twitch_clip_id", ""))
     if not mp4:
-        raise HTTPException(400, "No downloadable video is available for this clip.")
+        mp4 = clip_mp4_url(clip.get("thumbnail_url", ""))
+    if not mp4:
+        raise HTTPException(400, "Couldn't find a downloadable video file for this clip.")
 
     workdir = tempfile.mkdtemp(prefix="clip_")
     src = os.path.join(workdir, "src.mp4")
