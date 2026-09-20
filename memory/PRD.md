@@ -1,49 +1,63 @@
-# StreamClip AI — PRD
+# StreamClip AI — Product Requirements
 
 ## Original Problem Statement
-Website where the user adds Twitch channel links; it auto-detects when those people are live and starts clipping them; then adds relevant text over the clips and generates a title with hashtags for posting. High quality videos, clipped at fun/good moments.
+Add Twitch channels → the app AUTOMATICALLY records the streamers' own content, cuts the fun/hype
+moments, overlays relevant text/captions, and gives an AI title + hashtags. High-quality 9:16
+vertical videos (blurred background + centered clip + burned-in captions) that save directly to the
+phone. No Twitch login. Open access (no user accounts).
 
-## User Choices
-- Good-moment detection: chat activity spikes + fun/creepy moments
-- Clip creation: Twitch official Clip API; clips as long as possible
-- AI: GPT 5.4 (Emergent Universal LLM key)
-- Separate each channel; choose clips/day (default 24)
-- Also pull clips from past broadcasts on demand
-- User is obtaining Twitch dev credentials (Client ID + Secret)
+### Critical user intent (clarified June 2026)
+The user does NOT want Twitch's pre-made clips handed to them. The app must **make the clips itself**:
+record the streamer's own video feed and cut the moments where the live chat blows up.
+- Live streams → record the live feed when chat gets hyped.
+- Offline streamers → pull their **past broadcasts (VODs)** and cut ~24 hype moments each.
+- Full delete controls: delete one clip, delete all clips for a channel, delete all clips everywhere.
 
 ## Architecture
-- Frontend: React (CRA/craco) + Tailwind + shadcn/ui + framer-motion. Dark neon Twitch dashboard (sidebar + bento canvas). Files: `src/pages/Dashboard.jsx`, `src/components/{Sidebar,ClipCard,SettingsDialog,PullVodDialog}.jsx`, `src/lib/api.js`.
-- Backend: FastAPI + MongoDB (motor). All routes `/api`. `backend/server.py`.
-- Twitch Helix via app access token (client credentials) for live status, users, clips, VODs. User OAuth (clips:edit) for live Create Clip. Anonymous IRC websocket for chat-hype sampling.
-- AI: GPT 5.4 via emergentintegrations LlmChat for title/hashtags/on-clip caption.
+- Frontend: React + Tailwind + Shadcn (`/app/frontend`). Dashboard, Sidebar, ClipCard, PullVodDialog.
+- Backend: FastAPI + Motor/MongoDB (`/app/backend/server.py`, ~1300 lines).
+- Video: ffmpeg (server-side), CPU-throttled: `nice -n 19`, `-threads 1`, `asyncio.Semaphore(1)`.
+- AI: GPT-5.4 via Emergent LLM Key (titles/hashtags/captions).
+- Twitch: 100% public GraphQL (no OAuth/login). Client-ID `kimne78kx3ncx6brgo4mv6wki5h1ko`.
 
-## Personas
-- Clip editor / content creator turning streamers' live moments into short-form posts (TikTok/Reels/Shorts).
+## Self-recording engine (engine_v2 — June 2026)
+- `gql_list_vods()` — a channel's ARCHIVE VODs via public GQL.
+- `vod_playlist_url()` / `live_playlist_url()` — HLS via videoPlaybackAccessToken/streamPlaybackAccessToken + usher.
+- `vod_chat_density()` + `find_hype_moments_in_vod()` — sample VOD chat replay; densest windows = hype moments. Clip length scales with hype (18–45s).
+- `_store_vod_clips()` — creates clip docs (`source_type='vod'`, `vod_id`, `start_seconds`, `duration`), dedupes by offset, generates AI copy.
+- `render_vertical(..., ss, duration)` — ffmpeg seeks into the VOD/live feed and outputs 1080x1920 blurred+captioned H.264/AAC MP4, 30fps.
+- `render_clip_to_store()` — renders + extracts a poster frame.
+- `capture_live_moment()` + `live_monitor_loop()` — when a channel is live AND chat hype ≥55, record the live feed (20–60s) and render. (Only active while a channel is live.)
+- One-time `engine_v2` startup migration wipes old borrowed Twitch clips and re-records from VODs.
 
-## Core Requirements (static)
-- Add/remove Twitch channels; per-channel isolation and settings.
-- Live detection + viewer count. Chat-hype meter.
-- Fetch best clips (ranked by views = good moments); pull from past broadcasts.
-- AI title + hashtags + on-video caption; editable caption overlay (position/color/size).
-- Copy title+hashtags for posting. Per-channel clips/day limit (default 24).
+## Key API endpoints
+- `GET/POST/PATCH/DELETE /api/channels[/{id}]`
+- `POST /api/channels/{id}/sync` (body `{period_days:int}`), `POST /api/channels/{id}/pull-vod`, `GET /api/channels/{id}/vods`
+- `GET /api/channels/{id}/live`, `GET /api/channels/{id}/hype`
+- `GET /api/clips[?channel_id=]`, `GET /api/clips/{id}`, `PATCH /api/clips/{id}`, `POST /api/clips/{id}/generate`
+- `POST /api/clips/{id}/prepare` (bg render), `GET /api/clips/{id}/video` (9:16 MP4, attachment), `GET /api/clips/{id}/thumb` (poster)
+- `DELETE /api/clips/{id}` (single), `DELETE /api/clips[?channel_id=]` (all / per-channel)
 
-## Implemented (2026-06-19)
-- Demo mode: `POST /api/demo/seed` (3 channels, 6 clips each) for instant AHA without Twitch creds.
-- Channels CRUD, per-channel clips/day, auto_clip flag, caption overlay defaults.
-- Live status (`/live`), chat-hype sampling via anonymous IRC (`/hype`).
-- Clip sync (`/sync`, ranked by views), past-broadcast pull (`/pull-vod`), VOD list (`/vods`).
-- Real GPT 5.4 AI generation (`/clips/{id}/generate`) + inline auto-gen on sync; caption/overlay PATCH.
-- Twitch settings via UI (`/settings`, `/settings/twitch`), OAuth flow (`/auth/twitch/start|callback`), live Create Clip (`/clip-now`).
-- Background auto-sync loop (every 15 min) pulls new clips for live auto-clip channels up to daily limit.
-- Responsive UI incl. mobile drawer. All tests 100% pass (iteration_1).
+## DB schema (clips)
+`{id, channel_id, channel_login, source_type('vod'|'live'), vod_id, start_seconds, duration,
+twitch_clip_id('vod-<id>-<off>'|'live-<uuid>'), title, url, thumbnail_url, poster_file,
+hype_type, hype_density, game_name, ai_title, ai_hashtags[], ai_caption, caption_overlay,
+render_status('pending'|'rendering'|'done'|'error'), render_file, is_demo, created_at}`
 
-## Backlog / Remaining
-- P1: Real video download WITH burned-in captions (server-side ffmpeg render) — currently overlay is a live preview only.
-- P1: Persistent per-channel live chat monitoring worker (continuous hype-spike auto-clip triggering) — currently on-demand sampling.
-- P2: Direct posting/scheduling to TikTok/Reels/Shorts.
-- P2: Multi-user auth + saved token refresh/encryption.
-- P2: Custom clip length beyond Twitch's ~30-60s limit (self-recording pipeline).
+## Status (June 2026)
+Verified via testing_agent iteration_10: backend 11/12 pass, frontend 100%. Real VOD-recorded 9:16
+clips, poster thumbs, inline video playback, Save-to-phone via navigator.share, and all delete flows working.
+Channel IDs: xqc=476dc540-1e59-4e60-baee-ee6395832863, kaicenat=2e4bf3a5-fa1e-4823-997f-9497a13fc228,
+pokimane=a9defff4-626f-429f-a606-fcc8f5c788cd.
 
-## Notes / Limitations
-- Twitch Create Clip requires user OAuth (clips:edit) + broadcaster live & clips enabled.
-- On-video caption is a styled preview overlay, not yet burned into a downloadable file.
+## Backlog / Future
+- P1: Persist clips collection to disk (channels already persisted to `/app/.appdata`).
+- P2: crop-to-fill vs blurred-background toggle; streamer-name watermark.
+- P2: `up_to_date` flag on sync response (frontend now toasts "already have latest" when stored=0).
+- P3: Live capture is built but only testable when a channel is actually live.
+- P3: Stream `get_clip_video` instead of reading whole file into memory (fine at 30fps sizes now).
+
+## Notes for next agent
+- NO Twitch OAuth. NO user login. Keep ffmpeg CPU throttling (removing it → Cloudflare 502s).
+- Test /video by prepare→poll render_status=done→GET /video (avoids CF 100s edge timeout).
+- The 3 channels are real (is_demo=false); demo seed concept is effectively deprecated.

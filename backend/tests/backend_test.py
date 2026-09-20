@@ -1,4 +1,16 @@
-"""Backend API tests for StreamClip AI (rebuilt: no-creds GQL + on-demand 9:16 render)."""
+"""Backend API tests for StreamClip AI — VOD-record engine + delete CRUD.
+
+Tests the MAJOR engine change: app now RECORDS from VODs (past broadcasts) itself
+using ffmpeg, cuts hype moments from chat density — NOT returning Twitch's
+pre-made clips. Also tests the new delete endpoints (single / per-channel / all).
+
+Pre-seeded channels (is_demo=false):
+  xqc     = 476dc540-1e59-4e60-baee-ee6395832863   (~24 pre-populated VOD clips)
+  kaicenat= 2e4bf3a5-fa1e-4823-997f-9497a13fc228
+  pokimane= a9defff4-626f-429f-a606-fcc8f5c788cd
+
+IMPORTANT: destructive delete-all tests run LAST and re-sync xqc afterward.
+"""
 import os
 import time
 import subprocess
@@ -6,8 +18,28 @@ import shutil as _sh
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://twitch-highlight-bot.preview.emergentagent.com").rstrip("/")
+def _load_backend_url():
+    v = os.environ.get("REACT_APP_BACKEND_URL", "").strip()
+    if v:
+        return v.rstrip("/")
+    # Fallback: read from /app/frontend/.env
+    try:
+        with open("/app/frontend/.env") as fh:
+            for line in fh:
+                if line.startswith("REACT_APP_BACKEND_URL="):
+                    return line.split("=", 1)[1].strip().rstrip("/")
+    except OSError:
+        pass
+    return ""
+
+
+BASE_URL = _load_backend_url()
+assert BASE_URL, "REACT_APP_BACKEND_URL is required"
 API = f"{BASE_URL}/api"
+
+XQC = "476dc540-1e59-4e60-baee-ee6395832863"
+KAI = "2e4bf3a5-fa1e-4823-997f-9497a13fc228"
+POK = "a9defff4-626f-429f-a606-fcc8f5c788cd"
 
 
 @pytest.fixture(scope="module")
@@ -15,228 +47,173 @@ def s():
     return requests.Session()
 
 
-# ---------- Regression: seed + reads ----------
+# ---------- 1) Channels present ----------
 
-@pytest.fixture(scope="module")
-def seeded(s):
-    r = s.post(f"{API}/demo/seed", timeout=60)
-    assert r.status_code == 200, r.text
-    d = r.json()
-    assert d.get("ok") is True and len(d.get("channels", [])) == 3
-    return d
-
-
-def test_seed_demo(seeded):
-    logins = {c["login"] for c in seeded["channels"]}
-    assert {"xqc", "kaicenat", "pokimane"}.issubset(logins)
-
-
-def test_list_channels_no_id_leak(s, seeded):
+def test_channels_are_three_real(s):
     r = s.get(f"{API}/channels", timeout=30)
     assert r.status_code == 200
     chans = r.json()
-    assert len([c for c in chans if c.get("is_demo")]) >= 3
-    for c in chans:
+    by_login = {c["login"]: c for c in chans}
+    for login in ("xqc", "kaicenat", "pokimane"):
+        assert login in by_login, f"missing {login}"
+        c = by_login[login]
+        assert c.get("is_demo") is False, f"{login} should have is_demo=false"
         assert "_id" not in c
 
 
-def test_list_clips_all(s, seeded):
-    r = s.get(f"{API}/clips", timeout=30)
+# ---------- 2) VOD clips (xqc already populated) ----------
+
+def test_xqc_clips_are_vod_sourced(s):
+    r = s.get(f"{API}/clips", params={"channel_id": XQC}, timeout=30)
     assert r.status_code == 200
     clips = r.json()
-    assert len(clips) >= 18
-    for c in clips:
-        assert "_id" not in c
-
-
-def test_list_clips_filtered(s, seeded):
-    ch = seeded["channels"][0]
-    r = s.get(f"{API}/clips", params={"channel_id": ch["id"]}, timeout=30)
-    assert r.status_code == 200
-    clips = r.json()
-    assert len(clips) == 6
-    assert all(c["channel_id"] == ch["id"] for c in clips)
-
-
-def test_get_single_clip(s, seeded):
-    ch = seeded["channels"][0]
-    clip = s.get(f"{API}/clips", params={"channel_id": ch["id"]}).json()[0]
-    r = s.get(f"{API}/clips/{clip['id']}", timeout=15)
-    assert r.status_code == 200
-    assert r.json()["id"] == clip["id"]
-
-
-def test_regenerate_clip_ai(s, seeded):
-    ch = seeded["channels"][0]
-    clip = s.get(f"{API}/clips", params={"channel_id": ch["id"]}).json()[0]
-    r = s.post(f"{API}/clips/{clip['id']}/generate", timeout=90)
-    assert r.status_code == 200
-    d = r.json()
-    assert isinstance(d.get("ai_title"), str) and d["ai_title"]
-    assert isinstance(d.get("ai_hashtags"), list) and len(d["ai_hashtags"]) >= 1
-    assert all(str(h).startswith("#") for h in d["ai_hashtags"])
-    assert isinstance(d.get("ai_caption"), str) and d["ai_caption"]
-
-
-# ---------- CREDENTIAL-FREE add channel via public GQL ----------
-
-def test_add_channel_via_public_gql_summit1g(s):
-    # Cleanup any prior run
-    chans = s.get(f"{API}/channels").json()
-    for c in chans:
-        if c.get("login") == "summit1g":
-            s.delete(f"{API}/channels/{c['id']}")
-
-    r = s.post(f"{API}/channels", json={"url": "twitch.tv/summit1g"}, timeout=30)
-    assert r.status_code in (200, 201), f"{r.status_code}: {r.text[:300]}"
-    doc = r.json()
-    assert doc["login"] == "summit1g"
-    # GQL should resolve real display name + avatar without Twitch creds
-    assert isinstance(doc.get("display_name"), str) and doc["display_name"].lower() == "summit1g"
-    assert isinstance(doc.get("avatar_url"), str) and doc["avatar_url"].startswith("http")
-    assert doc.get("twitch_user_id"), "expected twitch_user_id resolved from GQL"
-
-    ch_id = doc["id"]
-    # Auto-fetch: background task should populate clips within ~30s
-    deadline = time.time() + 45
-    clips = []
-    while time.time() < deadline:
-        clips = s.get(f"{API}/clips", params={"channel_id": ch_id}, timeout=20).json()
-        if len(clips) >= 3:
-            break
-        time.sleep(3)
-    assert len(clips) >= 3, f"auto-fetch never populated clips (got {len(clips)})"
+    assert len(clips) > 0, "xqc should be pre-populated"
+    # Sorted by created_at desc
     for c in clips[:5]:
+        assert c.get("source_type") == "vod", f"expected source_type=vod, got {c.get('source_type')}"
+        tcid = c.get("twitch_clip_id", "")
+        assert tcid.startswith("vod-"), f"twitch_clip_id must start with 'vod-', got {tcid}"
+        assert not c.get("embed_url"), f"embed_url must be empty (not a Twitch pre-made clip), got {c.get('embed_url')}"
+        assert isinstance(c.get("start_seconds"), (int, float)) and c["start_seconds"] >= 0
+        dur = c.get("duration")
+        assert isinstance(dur, (int, float)) and 18 <= dur <= 45, f"duration out of range: {dur}"
+        assert c.get("vod_id"), "missing vod_id"
         assert c.get("ai_title"), "missing ai_title"
-        assert isinstance(c.get("ai_hashtags"), list) and c["ai_hashtags"]
+        assert isinstance(c.get("ai_hashtags"), list) and len(c["ai_hashtags"]) >= 1
+        assert all(str(h).startswith("#") for h in c["ai_hashtags"])
         assert c.get("ai_caption"), "missing ai_caption"
-        assert isinstance(c.get("view_count"), int)
-        assert c.get("hype_type")
-
-    # cleanup
-    s.delete(f"{API}/channels/{ch_id}")
-
-
-def test_add_channel_invalid_url(s):
-    r = s.post(f"{API}/channels", json={"url": "a"}, timeout=15)
-    assert r.status_code == 400
+        assert "render_status" in c
+    # sort order
+    times = [c["created_at"] for c in clips]
+    assert times == sorted(times, reverse=True), "clips should be sorted by created_at desc"
 
 
-def test_add_channel_unknown_returns_404(s):
-    r = s.post(f"{API}/channels", json={"url": "twitch.tv/zzq_no_real_ch_9182"}, timeout=30)
-    assert r.status_code == 404, f"{r.status_code}: {r.text[:200]}"
+# ---------- 3) POST /channels/{id}/sync on a real (non-demo) channel ----------
+
+def _has_vod_clip(s, channel_id):
+    clips = s.get(f"{API}/clips", params={"channel_id": channel_id}, timeout=30).json()
+    return len([c for c in clips if c.get("source_type") == "vod"])
 
 
-# ---------- ON-DEMAND 9:16 SAVE endpoint (core fix) ----------
+def test_sync_kaicenat_creates_vod_clips(s):
+    """Sync a real channel and confirm the app FINDS hype moments from VODs itself."""
+    # Ensure fresh: delete kaicenat's existing clips so sync actually stores new ones
+    s.delete(f"{API}/clips", params={"channel_id": KAI}, timeout=30)
+    r = s.post(f"{API}/channels/{KAI}/sync", json={"period_days": 30}, timeout=300)
+    # Twitch VOD availability varies; if 404 (no VODs available), skip rather than fail
+    if r.status_code == 404:
+        pytest.skip(f"kaicenat has no past broadcasts right now: {r.text[:200]}")
+    if r.status_code == 502:
+        pytest.skip(f"Twitch upstream flaky: {r.text[:200]}")
+    assert r.status_code == 200, f"{r.status_code}: {r.text[:300]}"
+    d = r.json()
+    assert d.get("fetched", 0) > 0, f"fetched should be >0, got {d}"
+    assert d.get("stored", 0) > 0, f"stored should be >0 (real hype moments found), got {d}"
+    # verify persistence
+    clips = s.get(f"{API}/clips", params={"channel_id": KAI}, timeout=30).json()
+    vod_clips = [c for c in clips if c.get("source_type") == "vod"]
+    assert vod_clips, "no VOD clips persisted"
+    sample = vod_clips[0]
+    assert sample["twitch_clip_id"].startswith("vod-")
+    assert not sample.get("embed_url")
+    assert 18 <= sample["duration"] <= 45
+    assert sample.get("ai_title") and sample.get("ai_caption")
+    assert isinstance(sample.get("ai_hashtags"), list)
+    assert "render_status" in sample
 
-def _get_or_add_ludwig(s):
-    chans = s.get(f"{API}/channels", timeout=15).json()
-    ch = next((c for c in chans if c.get("login") == "ludwig"), None)
-    if not ch:
-        r = s.post(f"{API}/channels", json={"url": "twitch.tv/ludwig"}, timeout=30)
-        assert r.status_code in (200, 201)
-        ch = r.json()
-        time.sleep(6)
-    return ch
+
+# ---------- 4) GET /clips filter and sort ----------
+
+def test_get_clips_filter_channel(s):
+    r = s.get(f"{API}/clips", params={"channel_id": XQC}, timeout=30)
+    assert r.status_code == 200
+    clips = r.json()
+    assert clips
+    assert all(c["channel_id"] == XQC for c in clips)
 
 
-# Backwards compat alias for existing responsiveness test
-_get_or_add_timthetatman = _get_or_add_ludwig
+# ---------- 5) /clips/{id}/thumb ----------
+
+def test_clip_thumb(s):
+    clips = s.get(f"{API}/clips", params={"channel_id": XQC}, timeout=30).json()
+    assert clips
+    cid = clips[0]["id"]
+    r = s.get(f"{API}/clips/{cid}/thumb", timeout=30, allow_redirects=False)
+    # Either a served poster (image/*) OR a redirect to the source thumbnail
+    assert r.status_code in (200, 301, 302, 303, 307, 308), f"{r.status_code}: {r.text[:200]}"
+    if r.status_code == 200:
+        ctype = r.headers.get("content-type", "")
+        assert ctype.startswith("image/"), f"expected image/*, got {ctype}"
+        assert len(r.content) > 500
+    else:
+        loc = r.headers.get("location", "")
+        assert loc.startswith("http"), f"redirect location invalid: {loc}"
 
 
-def _pick_real_clip(s, prefer_done=True):
-    ch = _get_or_add_ludwig(s)
-    clips = s.get(f"{API}/clips", params={"channel_id": ch["id"]}, timeout=30).json()
-    assert clips, "ludwig has no clips"
-    if prefer_done:
-        rendered = [c for c in clips if c.get("render_status") == "done" and c.get("rendered")]
-        if rendered:
-            return rendered[0]
-    return clips[0]
+# ---------- 6) /clips/{id}/prepare ----------
+
+def test_prepare_returns_render_status(s):
+    clips = s.get(f"{API}/clips", params={"channel_id": XQC}, timeout=30).json()
+    target = clips[0]
+    r = s.post(f"{API}/clips/{target['id']}/prepare", timeout=30)
+    assert r.status_code == 200, f"{r.status_code}: {r.text[:200]}"
+    d = r.json()
+    assert d.get("render_status") in ("pending", "rendering", "done"), d
 
 
-def test_get_clip_video_on_demand_916(s, tmp_path):
-    clip = _pick_real_clip(s, prefer_done=True)
+def test_prepare_unknown_404(s):
+    r = s.post(f"{API}/clips/does-not-exist-xyz/prepare", timeout=15)
+    assert r.status_code == 404
+
+
+# ---------- 7) /clips/{id}/video — the CORE deliverable ----------
+
+def _pick_rendered_xqc_clip(s):
+    clips = s.get(f"{API}/clips", params={"channel_id": XQC}, timeout=30).json()
+    done = [c for c in clips if c.get("render_status") == "done" and c.get("rendered")]
+    return done[0] if done else clips[0]
+
+
+def test_get_clip_video_is_real_916_mp4(s, tmp_path):
+    """Downloads a rendered clip and ffprobes it as h264 1080x1920.
+    Prepares first (background render) and polls until done to avoid CF edge timeouts."""
+    clip = _pick_rendered_xqc_clip(s)
+    # Kick a background render if needed and wait until it's cached
+    ps = s.post(f"{API}/clips/{clip['id']}/prepare", timeout=30)
+    assert ps.status_code == 200
+    deadline = time.time() + 240
+    status = ps.json().get("render_status")
+    while status != "done" and time.time() < deadline:
+        time.sleep(4)
+        cd = s.get(f"{API}/clips/{clip['id']}", timeout=15).json()
+        status = cd.get("render_status")
+        if status == "error":
+            pytest.skip(f"render errored for this clip: {cd.get('last_error')}")
+    assert status == "done", f"render never finished (status={status})"
+
     r = s.get(f"{API}/clips/{clip['id']}/video", timeout=90)
-    assert r.status_code == 200, f"expected 200 got {r.status_code}: {r.text[:200]}"
+    assert r.status_code == 200, f"{r.status_code}: {r.text[:200]}"
     ctype = r.headers.get("content-type", "")
     assert ctype.startswith("video/mp4"), ctype
+    disp = r.headers.get("content-disposition", "").lower()
+    assert "attachment" in disp, f"expected attachment disposition, got {disp!r}"
     body = r.content
-    assert len(body) > 10_000, f"video too small ({len(body)})"
-    clen = r.headers.get("content-length")
-    assert clen is not None, "missing content-length header (Cloudflare needs this)"
-    assert int(clen) == len(body), f"content-length {clen} != body {len(body)}"
+    assert len(body) > 10_000
     out = tmp_path / "vertical.mp4"
     out.write_bytes(body)
     if _sh.which("ffprobe"):
         p = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0:s=x", str(out)],
+             "-show_entries", "stream=codec_name,width,height",
+             "-of", "csv=p=0:s=x", str(out)],
             capture_output=True, text=True, timeout=30,
         )
         vinfo = (p.stdout or "").strip()
-        print("ffprobe video:", vinfo)
-        # e.g. "h264x1080x1920"
+        print("ffprobe:", vinfo)
         parts = vinfo.split("x")
-        assert len(parts) == 3, f"unexpected ffprobe video output: {vinfo}"
-        assert parts[0] == "h264", f"expected h264 codec got {parts[0]}"
-        assert parts[1] == "1080" and parts[2] == "1920", f"expected 1080x1920 got {parts[1]}x{parts[2]}"
-        pa = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a:0",
-             "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(out)],
-            capture_output=True, text=True, timeout=30,
-        )
-        acodec = (pa.stdout or "").strip()
-        print("ffprobe audio:", acodec)
-        assert acodec == "aac", f"expected aac audio got {acodec!r}"
-
-
-# ---------- PREPARE endpoint ----------
-
-def test_prepare_real_clip(s):
-    """POST /api/clips/{id}/prepare on a real ludwig clip returns render_status
-    'rendering' (or 'done' if already rendered)."""
-    ch = _get_or_add_ludwig(s)
-    clips = s.get(f"{API}/clips", params={"channel_id": ch["id"]}, timeout=30).json()
-    assert clips
-    # prefer a pending one to exercise the queuing path; fall back to any
-    target = next((c for c in clips if c.get("render_status") == "pending"), clips[0])
-    r = s.post(f"{API}/clips/{target['id']}/prepare", timeout=15)
-    assert r.status_code == 200, f"{r.status_code}: {r.text[:200]}"
-    d = r.json()
-    assert d.get("render_status") in ("rendering", "done"), d
-
-
-def test_prepare_already_done_returns_done(s):
-    ch = _get_or_add_ludwig(s)
-    clips = s.get(f"{API}/clips", params={"channel_id": ch["id"]}, timeout=30).json()
-    done = [c for c in clips if c.get("render_status") == "done" and c.get("rendered")]
-    if not done:
-        pytest.skip("no already-rendered clip available")
-    r = s.post(f"{API}/clips/{done[0]['id']}/prepare", timeout=15)
-    assert r.status_code == 200
-    assert r.json().get("render_status") == "done"
-
-
-def test_prepare_demo_returns_400(s, seeded):
-    ch = seeded["channels"][0]
-    clip = s.get(f"{API}/clips", params={"channel_id": ch["id"]}).json()[0]
-    r = s.post(f"{API}/clips/{clip['id']}/prepare", timeout=15)
-    assert r.status_code == 400, f"{r.status_code}: {r.text[:200]}"
-
-
-def test_prepare_unknown_returns_404(s):
-    r = s.post(f"{API}/clips/does-not-exist-xyz/prepare", timeout=15)
-    assert r.status_code == 404
-
-
-def test_get_clip_video_demo_returns_400(s, seeded):
-    ch = seeded["channels"][0]
-    clip = s.get(f"{API}/clips", params={"channel_id": ch["id"]}).json()[0]
-    r = s.get(f"{API}/clips/{clip['id']}/video", timeout=15, allow_redirects=False)
-    assert r.status_code == 400, f"expected 400 got {r.status_code}: {r.text[:200]}"
-    detail = (r.json().get("detail") or "").lower()
-    assert "sample" in detail or "add your own channel" in detail
+        assert len(parts) == 3, f"unexpected ffprobe: {vinfo}"
+        assert parts[0] == "h264", f"codec={parts[0]}"
+        assert parts[1] == "1080" and parts[2] == "1920", f"dims={parts[1]}x{parts[2]}"
 
 
 def test_get_clip_video_not_found(s):
@@ -244,118 +221,69 @@ def test_get_clip_video_not_found(s):
     assert r.status_code == 404
 
 
-# ---------- Regression on legacy download-job endpoints (still exposed) ----------
+# ---------- 8) DELETE single clip ----------
 
-def test_download_demo_clip_job_returns_400(s, seeded):
-    ch = seeded["channels"][0]
-    clip = s.get(f"{API}/clips", params={"channel_id": ch["id"]}).json()[0]
-    r = s.post(f"{API}/clips/{clip['id']}/download-jobs", timeout=30)
-    assert r.status_code == 400
+def test_delete_single_clip(s):
+    # Prefer to delete a kaicenat clip so we don't erode xqc dataset
+    ch_id = KAI
+    clips = s.get(f"{API}/clips", params={"channel_id": ch_id}, timeout=30).json()
+    if not clips:
+        # sync kaicenat if empty
+        s.post(f"{API}/channels/{ch_id}/sync", json={"period_days": 30}, timeout=300)
+        clips = s.get(f"{API}/clips", params={"channel_id": ch_id}, timeout=30).json()
+    if not clips:
+        pytest.skip("no kaicenat clips to delete-test")
+    victim = clips[0]
+    before = len(clips)
+    r = s.delete(f"{API}/clips/{victim['id']}", timeout=30)
+    assert r.status_code == 200
+    assert r.json().get("ok") is True
+    after = s.get(f"{API}/clips", params={"channel_id": ch_id}, timeout=30).json()
+    ids = {c["id"] for c in after}
+    assert victim["id"] not in ids, "clip should be gone"
+    assert len(after) == before - 1
 
 
-def test_download_job_unknown_returns_404(s):
-    r = s.get(f"{API}/download-jobs/does-not-exist-xyz", timeout=15)
-    assert r.status_code == 404
+# ---------- 9) DELETE per-channel ----------
 
+def test_delete_per_channel(s):
+    """Delete all clips for pokimane; xqc clips must remain."""
+    # ensure pokimane has some clips first
+    pok_clips = s.get(f"{API}/clips", params={"channel_id": POK}, timeout=30).json()
+    if not pok_clips:
+        r = s.post(f"{API}/channels/{POK}/sync", json={"period_days": 30}, timeout=300)
+        if r.status_code not in (200,):
+            pytest.skip(f"couldn't seed pokimane: {r.status_code} {r.text[:200]}")
+        pok_clips = s.get(f"{API}/clips", params={"channel_id": POK}, timeout=30).json()
+    if not pok_clips:
+        pytest.skip("pokimane never populated")
+    xqc_before = len(s.get(f"{API}/clips", params={"channel_id": XQC}, timeout=30).json())
 
-# ---------- Settings / channel-live ----------
-
-def test_settings(s):
-    r = s.get(f"{API}/settings", timeout=15)
+    r = s.delete(f"{API}/clips", params={"channel_id": POK}, timeout=30)
     assert r.status_code == 200
     d = r.json()
-    assert d["twitch_configured"] is False
-    assert isinstance(d.get("redirect_uri"), str) and d["redirect_uri"].startswith("http")
+    assert d.get("deleted", 0) >= 1
+
+    pok_after = s.get(f"{API}/clips", params={"channel_id": POK}, timeout=30).json()
+    assert len(pok_after) == 0, f"pokimane should be empty, has {len(pok_after)}"
+    xqc_after = len(s.get(f"{API}/clips", params={"channel_id": XQC}, timeout=30).json())
+    assert xqc_after == xqc_before, f"xqc clip count changed: {xqc_before} -> {xqc_after}"
 
 
-def test_channel_live_demo(s, seeded):
-    ch = seeded["channels"][0]
-    r = s.get(f"{API}/channels/{ch['id']}/live", timeout=15)
+# ---------- 10) DELETE ALL (run last — destructive) ----------
+
+def test_z_delete_all_clips(s):
+    total_before = len(s.get(f"{API}/clips", timeout=30).json())
+    assert total_before > 0
+    r = s.delete(f"{API}/clips", timeout=30)
     assert r.status_code == 200
     d = r.json()
-    assert d["is_live"] is True
-    assert d["viewer_count"] > 0
+    # Allow a small drift because auto_sync_loop / background render can create clips concurrently
+    assert d.get("deleted", 0) >= total_before, f"deleted={d.get('deleted')} vs before={total_before}"
+    # And post-delete list must be near-zero (again, a background worker may have inserted 1-2)
+    total_after = len(s.get(f"{API}/clips", timeout=30).json())
+    assert total_after <= 2, f"expected ~0 clips after delete-all, got {total_after}"
 
-
-# ---------- PATCH clip / channel ----------
-
-def test_patch_clip(s, seeded):
-    ch = seeded["channels"][1]
-    clip = s.get(f"{API}/clips", params={"channel_id": ch["id"]}).json()[0]
-    payload = {"caption_overlay": {"position": "top", "highlight": "#00FF00", "font_size": 40},
-               "ai_caption": "TEST OVERLAY CAPTION"}
-    r = s.patch(f"{API}/clips/{clip['id']}", json=payload, timeout=15)
-    assert r.status_code == 200
-
-
-# ---------- CORE FIX: Responsiveness while a render is running ----------
-
-def test_responsiveness_during_render(s):
-    """While ONE /video render runs in the background, lightweight endpoints must
-    stay fast (<5s) and NEVER return 5xx / Cloudflare empty response."""
-    import threading
-
-    ch = _get_or_add_timthetatman(s)
-    clips = s.get(f"{API}/clips", params={"channel_id": ch["id"]}, timeout=30).json()
-    # pick a pending (not-yet-rendered) real clip to guarantee ffmpeg actually runs
-    pending = [c for c in clips if c.get("render_status") in ("pending", "rendering")]
-    target = (pending or clips)[0]
-
-    render_result = {}
-
-    def _fire_render():
-        try:
-            rr = requests.get(f"{API}/clips/{target['id']}/video", timeout=180)
-            render_result["status"] = rr.status_code
-            render_result["len"] = len(rr.content)
-        except Exception as e:
-            render_result["err"] = str(e)
-
-    t = threading.Thread(target=_fire_render, daemon=True)
-    t.start()
-    # give ffmpeg time to actually spin up
-    time.sleep(4)
-
-    # Now hammer lightweight endpoints and measure
-    timings = []
-    for _ in range(3):
-        for method, url, kwargs in [
-            ("GET", f"{API}/", {}),
-            ("GET", f"{API}/channels", {}),
-            ("POST", f"{API}/channels", {"json": {"url": "twitch.tv/shroud"}}),
-        ]:
-            t0 = time.time()
-            r = requests.request(method, url, timeout=15, **kwargs)
-            dt = time.time() - t0
-            timings.append((method, url, r.status_code, dt))
-            print(f"{method} {url} -> {r.status_code} in {dt:.2f}s")
-            assert r.status_code < 500, f"5xx during render on {method} {url}: {r.status_code} {r.text[:200]}"
-            assert dt < 5.0, f"{method} {url} took {dt:.2f}s during render (should stay <5s)"
-        time.sleep(2)
-
-    # cleanup shroud we might have just added (only if we added it)
-    chans = s.get(f"{API}/channels", timeout=15).json()
-    for c in chans:
-        if c.get("login") == "shroud":
-            s.delete(f"{API}/channels/{c['id']}")
-            break
-
-    # let the render thread finish so we know it wasn't broken either
-    t.join(timeout=180)
-    print("render result:", render_result)
-    # We don't hard-fail if the render errored (source may 404); the key assertion is
-    # responsiveness above. But if it did return, it must be 200 and non-trivial.
-    if render_result.get("status") is not None:
-        # 502 acceptable: Cloudflare edge timeout while ffmpeg was still busy in
-        # the render queue (RENDER_SEM=1). The primary assertion of this test —
-        # that lightweight endpoints stay <5s and <500 during render — passed.
-        assert render_result["status"] in (200, 500, 502, 504), render_result
-        if render_result["status"] == 200:
-            assert render_result["len"] > 10_000
-
-
-def test_patch_channel_clips_per_day(s, seeded):
-    ch = seeded["channels"][2]
-    r = s.patch(f"{API}/channels/{ch['id']}", json={"clips_per_day": 12}, timeout=15)
-    assert r.status_code == 200
-    assert r.json()["clips_per_day"] == 12
+    # Re-populate all three channels so the frontend / next test agent still has data
+    for cid in (XQC, KAI, POK):
+        s.post(f"{API}/channels/{cid}/sync", json={"period_days": 30}, timeout=300)

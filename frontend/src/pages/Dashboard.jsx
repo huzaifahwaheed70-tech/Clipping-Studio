@@ -43,9 +43,13 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
     setSyncing(true);
     try {
       const res = await onSync(channel.id);
-      toast.success(`Grabbed ${res.stored} clips with AI titles`);
+      if (res.stored > 0) {
+        toast.success(`Recorded ${res.stored} new hype moments`);
+      } else {
+        toast.info("You already have the latest moments from this channel's broadcasts");
+      }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Sync failed");
+      toast.error(e?.response?.data?.detail || "Couldn't grab clips");
     }
     setSyncing(false);
   };
