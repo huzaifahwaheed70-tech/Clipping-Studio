@@ -134,10 +134,8 @@ export default function Sidebar({
 
       <div className="p-4 border-t border-[#262636] space-y-2">
         <div className="flex items-center gap-2 text-[11px] font-jb">
-          <span className={`h-2 w-2 rounded-full ${twitchConfigured ? "bg-[#00E676]" : "bg-[#FFB703]"}`} />
-          <span className="text-[#A0A0B8]">
-            {twitchConfigured ? "Twitch connected" : "Twitch not connected"}
-          </span>
+          <span className="live-dot h-2 w-2 rounded-full bg-[#00E676]" />
+          <span className="text-[#A0A0B8]">Auto-clipping · no login needed</span>
         </div>
         <Button
           data-testid="open-settings-button"

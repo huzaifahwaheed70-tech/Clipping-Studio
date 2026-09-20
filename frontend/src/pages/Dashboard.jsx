@@ -137,7 +137,7 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
           <Video className="h-8 w-8 text-[#686880] mx-auto mb-3" />
           <p className="text-[#A0A0B8] text-sm">No clips yet.</p>
           <p className="text-[#686880] text-xs mt-1">
-            {channel.is_demo ? "Demo channel" : 'Hit "Get clips" to pull the best moments.'}
+            {channel.is_demo ? "Demo channel" : "Fetching & rendering the best clips automatically…"}
           </p>
         </div>
       ) : (
@@ -201,6 +201,7 @@ export default function Dashboard() {
       await loadClips();
       await refreshLive(chs);
     })();
+    const poll = setInterval(() => { loadClips(); }, 6000);
     const params = new URLSearchParams(window.location.search);
     if (params.get("twitch") === "connected") {
       toast.success("Twitch account authorized for clip creation!");
@@ -209,6 +210,7 @@ export default function Dashboard() {
       toast.error("Twitch authorization failed. Try again.");
       window.history.replaceState({}, "", "/");
     }
+    return () => clearInterval(poll);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -345,8 +347,9 @@ export default function Dashboard() {
                 Turn live streams into <span className="text-[#9146FF]">viral clips</span>
               </h2>
               <p className="text-[#A0A0B8] mb-8 max-w-lg mx-auto">
-                Add any Twitch channel. StreamClip AI watches for hype, creepy and clutch moments,
-                grabs the clips, then writes viral titles, hashtags and on-video captions for you.
+                Add any Twitch channel — no login needed. StreamClip AI grabs its best hype, creepy and
+                clutch moments, writes viral titles, hashtags and on-video captions, and hands you a
+                ready 9:16 video to save to your phone.
               </p>
               <div className="flex items-center justify-center gap-3">
                 <Button

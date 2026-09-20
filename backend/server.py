@@ -284,6 +284,83 @@ async def sample_hype(login: str, seconds: int = 6) -> dict:
     return {"messages_per_minute": per_min, "hype_level": level, "sampled": True}
 
 
+# ---------------- Twitch GQL (no credentials needed) ----------------
+
+CLIPS_QUERY = """query($login:String!,$limit:Int!,$period:ClipsPeriod!){
+  user(login:$login){
+    id displayName profileImageURL(width:150) description
+    clips(first:$limit, criteria:{period:$period, sort:VIEWS_DESC}){
+      edges{ node{ slug title viewCount durationSeconds createdAt thumbnailURL game{ name } } }
+    }
+  }
+}"""
+
+INFO_QUERY = """query($login:String!){
+  user(login:$login){ id displayName profileImageURL(width:150) description
+    stream{ id viewersCount type game{ name } } lastBroadcast{ title } }
+}"""
+
+
+def _period_for(days: int) -> str:
+    if days <= 1:
+        return "LAST_DAY"
+    if days <= 7:
+        return "LAST_WEEK"
+    if days <= 31:
+        return "LAST_MONTH"
+    return "ALL_TIME"
+
+
+async def gql_query(query: str, variables: dict):
+    try:
+        async with httpx.AsyncClient(timeout=25) as c:
+            r = await c.post("https://gql.twitch.tv/gql",
+                             json={"query": query, "variables": variables},
+                             headers={"Client-ID": GQL_CLIENT_ID})
+        if r.status_code != 200:
+            logger.warning(f"gql http {r.status_code}")
+            return None
+        d = r.json()
+        if isinstance(d, dict):
+            if d.get("errors"):
+                logger.warning(f"gql errors: {str(d['errors'])[:200]}")
+            return d.get("data")
+        return None
+    except Exception as e:
+        logger.warning(f"gql failed: {e}")
+        return None
+
+
+def _node_to_raw(node: dict) -> dict:
+    slug = node["slug"]
+    return {
+        "id": slug,
+        "title": node.get("title", ""),
+        "url": f"https://clips.twitch.tv/{slug}",
+        "embed_url": f"https://clips.twitch.tv/embed?clip={slug}",
+        "thumbnail_url": node.get("thumbnailURL", ""),
+        "duration": node.get("durationSeconds", 0),
+        "view_count": node.get("viewCount", 0),
+        "creator_name": "",
+        "game_name": (node.get("game") or {}).get("name", ""),
+        "created_at": node.get("createdAt", ""),
+    }
+
+
+async def gql_channel_info(login: str):
+    data = await gql_query(INFO_QUERY, {"login": login})
+    return (data or {}).get("user")
+
+
+async def gql_list_clips(login: str, period: str, limit: int = 100):
+    data = await gql_query(CLIPS_QUERY, {"login": login, "limit": limit, "period": period})
+    user = (data or {}).get("user")
+    if not user:
+        return None, []
+    edges = (user.get("clips") or {}).get("edges") or []
+    return user, [_node_to_raw(e["node"]) for e in edges if e.get("node")]
+
+
 # ---------------- Routes ----------------
 
 @api.get("/")
@@ -332,25 +409,17 @@ async def add_channel(body: ChannelCreate):
     if existing:
         raise HTTPException(400, f"{login} is already added.")
 
-    display_name, user_id, avatar, description = login, None, "", ""
-    cid, csec = await get_creds()
-    if cid and csec:
-        data = await helix("/users", {"login": login})
-        if not data.get("data"):
-            raise HTTPException(404, f"No Twitch channel found for '{login}'.")
-        u = data["data"][0]
-        display_name = u["display_name"]
-        user_id = u["id"]
-        avatar = u["profile_image_url"]
-        description = u.get("description", "")
+    user = await gql_channel_info(login)
+    if not user:
+        raise HTTPException(404, f"No Twitch channel found for '{login}'.")
 
     doc = {
         "id": str(uuid.uuid4()),
         "login": login,
-        "display_name": display_name,
-        "twitch_user_id": user_id,
-        "avatar_url": avatar,
-        "description": description,
+        "display_name": user.get("displayName") or login,
+        "twitch_user_id": user.get("id"),
+        "avatar_url": user.get("profileImageURL") or "",
+        "description": user.get("description") or "",
         "clips_per_day": 24,
         "auto_clip": True,
         "caption_overlay": dict(DEFAULT_OVERLAY),
@@ -359,6 +428,8 @@ async def add_channel(body: ChannelCreate):
     }
     await db.channels.insert_one(dict(doc))
     await snapshot_channels()
+    # Do it for them: auto-fetch + auto-render this channel's best clips in the background
+    asyncio.create_task(auto_pull_channel(doc, "LAST_MONTH"))
     return clean(doc)
 
 
@@ -390,14 +461,13 @@ async def channel_live(channel_id: str):
     if ch.get("is_demo"):
         return {"is_live": True, "viewer_count": 42137, "title": "DEMO: cranking clips live!",
                 "game_name": "Just Chatting", "started_at": now_iso()}
-    if not ch.get("twitch_user_id"):
+    user = await gql_channel_info(ch["login"])
+    stream = (user or {}).get("stream")
+    if not stream:
         return {"is_live": False, "viewer_count": 0, "title": "", "game_name": ""}
-    data = await helix("/streams", {"user_id": ch["twitch_user_id"]})
-    if not data.get("data"):
-        return {"is_live": False, "viewer_count": 0, "title": "", "game_name": ""}
-    s = data["data"][0]
-    return {"is_live": True, "viewer_count": s["viewer_count"], "title": s["title"],
-            "game_name": s.get("game_name", ""), "started_at": s.get("started_at")}
+    return {"is_live": True, "viewer_count": stream.get("viewersCount", 0),
+            "title": ((user or {}).get("lastBroadcast") or {}).get("title", ""),
+            "game_name": (stream.get("game") or {}).get("name", ""), "started_at": ""}
 
 
 @api.get("/channels/{channel_id}/hype")
@@ -437,6 +507,9 @@ async def _store_clips(ch, raw_clips, limit, generate_ai=True):
             "hype_type": hype_for(rc["id"]),
             "caption_overlay": dict(ch.get("caption_overlay", DEFAULT_OVERLAY)),
             "is_demo": False,
+            "rendered": False,
+            "render_status": "pending",
+            "render_file": None,
             "created_at": now_iso(),
         }
         if generate_ai:
@@ -454,6 +527,23 @@ async def _store_clips(ch, raw_clips, limit, generate_ai=True):
     return out
 
 
+async def auto_pull_channel(ch: dict, period: str = "LAST_WEEK"):
+    """Fetch a channel's best clips via GQL and store them with AI titles/captions.
+    Rendering to 9:16 happens on-demand when the user saves (keeps the server stable)."""
+    try:
+        limit = ch.get("clips_per_day", 24)
+        existing = await db.clips.count_documents({"channel_id": ch["id"]})
+        if existing >= limit:
+            return []
+        user, raw = await gql_list_clips(ch["login"], period, 100)
+        if not raw:
+            return []
+        return await _store_clips(ch, raw, limit)
+    except Exception as e:
+        logger.warning(f"auto_pull_channel {ch.get('login')}: {e}")
+        return []
+
+
 @api.post("/channels/{channel_id}/sync")
 async def sync_clips(channel_id: str, body: SyncRequest):
     ch = await db.channels.find_one({"id": channel_id})
@@ -461,11 +551,10 @@ async def sync_clips(channel_id: str, body: SyncRequest):
         raise HTTPException(404, "Channel not found")
     if ch.get("is_demo"):
         raise HTTPException(400, "This is a demo channel with sample clips already loaded.")
-    if not ch.get("twitch_user_id"):
-        raise HTTPException(400, "Connect Twitch in Settings so I can look up this channel.")
-    started = (datetime.now(timezone.utc) - timedelta(days=max(1, body.period_days))).isoformat()
-    data = await helix("/clips", {"broadcaster_id": ch["twitch_user_id"], "started_at": started, "first": 100})
-    raw = data.get("data", [])
+    period = _period_for(max(1, body.period_days))
+    user, raw = await gql_list_clips(ch["login"], period, 100)
+    if user is None:
+        raise HTTPException(502, "Couldn't reach Twitch to fetch clips right now. Try again in a moment.")
     limit = ch.get("clips_per_day", 24)
     stored = await _store_clips(ch, raw, limit)
     return {"fetched": len(raw), "stored": len(stored), "clips": stored}
@@ -476,25 +565,21 @@ async def list_vods(channel_id: str):
     ch = await db.channels.find_one({"id": channel_id})
     if not ch:
         raise HTTPException(404, "Channel not found")
-    if not ch.get("twitch_user_id"):
-        raise HTTPException(400, "Connect Twitch in Settings first.")
-    data = await helix("/videos", {"user_id": ch["twitch_user_id"], "type": "archive", "first": 20})
-    return [{"id": v["id"], "title": v["title"], "created_at": v["created_at"],
-             "duration": v["duration"], "url": v["url"], "thumbnail_url": v.get("thumbnail_url", "")}
-            for v in data.get("data", [])]
+    return []
 
 
 @api.post("/channels/{channel_id}/pull-vod")
 async def pull_vod(channel_id: str, days: int = Query(30)):
-    """Pull the best clips from a channel's past broadcasts window."""
+    """Pull the best clips from a channel's past broadcasts window (credential-free via GQL)."""
     ch = await db.channels.find_one({"id": channel_id})
     if not ch:
         raise HTTPException(404, "Channel not found")
-    if not ch.get("twitch_user_id"):
-        raise HTTPException(400, "Connect Twitch in Settings first.")
-    started = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
-    data = await helix("/clips", {"broadcaster_id": ch["twitch_user_id"], "started_at": started, "first": 100})
-    raw = data.get("data", [])
+    if ch.get("is_demo"):
+        raise HTTPException(400, "This is a demo channel with sample clips already loaded.")
+    period = _period_for(max(1, days))
+    user, raw = await gql_list_clips(ch["login"], period, 100)
+    if user is None:
+        raise HTTPException(502, "Couldn't reach Twitch to fetch clips right now. Try again in a moment.")
     limit = ch.get("clips_per_day", 24)
     stored = await _store_clips(ch, raw, limit)
     return {"fetched": len(raw), "stored": len(stored), "clips": stored}
@@ -505,6 +590,14 @@ async def get_clips(channel_id: str | None = None):
     q = {"channel_id": channel_id} if channel_id else {}
     clips = await db.clips.find(q, {"_id": 0}).sort("view_count", -1).to_list(2000)
     return clips
+
+
+@api.get("/clips/{clip_id}")
+async def get_clip(clip_id: str):
+    clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
+    if not clip:
+        raise HTTPException(404, "Clip not found")
+    return clip
 
 
 @api.post("/clips/{clip_id}/generate")
@@ -641,6 +734,61 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
 
 RENDER_DIR = "/tmp/renders"
 os.makedirs(RENDER_DIR, exist_ok=True)
+RENDER_SEM = asyncio.Semaphore(3)
+
+
+async def render_clip_to_store(clip_id: str):
+    """Render a clip to a stored 9:16 file so it's ready to save instantly."""
+    clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
+    if not clip or clip.get("is_demo"):
+        return
+    if clip.get("render_file") and os.path.exists(clip["render_file"]):
+        await db.clips.update_one({"id": clip_id}, {"$set": {"rendered": True, "render_status": "done"}})
+        return
+    await db.clips.update_one({"id": clip_id}, {"$set": {"render_status": "rendering"}})
+    workdir = tempfile.mkdtemp(prefix="clip_")
+    try:
+        async with RENDER_SEM:
+            mp4 = await resolve_clip_source(clip.get("twitch_clip_id", "")) or clip_mp4_url(clip.get("thumbnail_url", ""))
+            if not mp4:
+                raise RuntimeError("no downloadable source")
+            out = os.path.join(RENDER_DIR, f"clip_{clip_id}.mp4")
+            await render_vertical(mp4, out, clip.get("ai_caption", ""), clip.get("caption_overlay", DEFAULT_OVERLAY), workdir)
+        await db.clips.update_one({"id": clip_id}, {"$set": {"rendered": True, "render_status": "done", "render_file": out}})
+    except Exception as e:
+        logger.warning(f"render_clip_to_store {clip_id}: {e}")
+        await db.clips.update_one({"id": clip_id}, {"$set": {"render_status": "error"}})
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+@api.get("/clips/{clip_id}/video")
+async def get_clip_video(clip_id: str):
+    """Serve the ready-to-save 9:16 MP4 (renders on-demand if not cached yet)."""
+    clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
+    if not clip:
+        raise HTTPException(404, "Clip not found")
+    if clip.get("is_demo"):
+        raise HTTPException(400, "This is a sample clip. Add your own channel to get real, saveable videos.")
+    if not (clip.get("render_file") and os.path.exists(clip["render_file"])):
+        await render_clip_to_store(clip_id)
+        clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
+    f = (clip or {}).get("render_file")
+    if not f or not os.path.exists(f):
+        raise HTTPException(500, "Could not render this clip. Please try another.")
+    with open(f, "rb") as fh:
+        data = fh.read()
+    name = re.sub(r"[^a-zA-Z0-9]+", "_", (clip.get("ai_title") or clip.get("title") or "clip")).strip("_")[:50] or "clip"
+    return Response(
+        content=data,
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}_9x16.mp4"',
+            "Content-Length": str(len(data)),
+            "Cache-Control": "no-store",
+            "Accept-Ranges": "none",
+        },
+    )
 
 
 async def _prune_old_renders():
@@ -848,26 +996,12 @@ async def auto_sync_loop():
     await asyncio.sleep(30)
     while True:
         try:
-            cid, csec = await get_creds()
-            if cid and csec:
-                chans = await db.channels.find({"auto_clip": True, "is_demo": {"$ne": True}}).to_list(200)
-                for ch in chans:
-                    if not ch.get("twitch_user_id"):
-                        continue
-                    try:
-                        live = await helix("/streams", {"user_id": ch["twitch_user_id"]})
-                        if not live.get("data"):
-                            continue
-                        started = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-                        data = await helix("/clips", {"broadcaster_id": ch["twitch_user_id"], "started_at": started, "first": 100})
-                        current = await db.clips.count_documents({
-                            "channel_id": ch["id"],
-                            "created_at": {"$gte": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()}})
-                        remaining = max(0, ch.get("clips_per_day", 24) - current)
-                        if remaining:
-                            await _store_clips(ch, data.get("data", []), remaining)
-                    except Exception as e:
-                        logger.warning(f"auto-sync {ch.get('login')}: {e}")
+            chans = await db.channels.find({"auto_clip": True, "is_demo": {"$ne": True}}).to_list(200)
+            for ch in chans:
+                try:
+                    await auto_pull_channel(ch, "LAST_WEEK")
+                except Exception as e:
+                    logger.warning(f"auto-sync {ch.get('login')}: {e}")
         except Exception as e:
             logger.warning(f"auto_sync_loop: {e}")
         await asyncio.sleep(900)  # every 15 minutes
