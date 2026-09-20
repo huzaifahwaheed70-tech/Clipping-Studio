@@ -1,0 +1,42 @@
+{
+  "summary": "Re-tested the real-clip download flow after switching from thumbnail-hack to Twitch GQL (VideoAccessToken_Clip) resolution. Backend logic is correct: locally (uvicorn @127.0.0.1) GET /api/clips/e2e-real/download returns 200 video/mp4 and ffprobe confirms exactly 1080x1920. GQL call to gql.twitch.tv succeeds, sourceURL is fetched from cloudfront, and ffmpeg renders the 9:16 blurred-fill + drawtext caption. HOWEVER, via the EXTERNAL REACT_APP_BACKEND_URL the request consistently returns 502 (Cloudflare) at exactly ~60s — the render takes ~60s wall-clock for this clip, which is on the edge of the ingress timeout, so real users behind the preview URL will not receive the file. This is the key remaining issue for the fix. All other regression tests pass (14/15). Demo-clip download still correctly returns 400 with friendly message. Frontend download button on a demo clip fires a sonner info toast, disables the button while downloading, and does NOT navigate to a raw JSON page (verified in browser).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/clips/e2e-real/download", "issue": "External ingress (Cloudflare) returns 502 at ~60s because the full download+ffmpeg render exceeds the edge timeout (locally the request completes in ~60s and returns valid 1080x1920 MP4). Real users will not be able to download real clips through the public URL even though the backend logic is correct.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "render_vertical()", "issue": "drawtext textfile= is used but the caption is written raw with .upper(); backslashes/single-quotes in an AI-generated caption could still break the filtergraph. Sanitize or escape."},
+      {"endpoint": "download_clip()", "issue": "workdir is only guaranteed cleaned via the FileResponse BackgroundTask on success; if the render/download raises before returning FileResponse (e.g., ffmpeg 500), the raise path removes it, but a client-disconnect during the ffmpeg await leaves the mkdtemp until process death. Wrap in try/except with shutil.rmtree in finally for safety."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Real clip download from ClipCard", "issue": "Because backend request times out at the ingress (502) after ~60s, the sonner loading toast will flip to an error toast for real (non-demo) clips through the public URL. UX-wise the client also has no timeout hint; consider AbortController with a longer visible message.", "affected_selectors": ["[data-testid^=download-clip-button-]"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Speed up render pipeline so total time stays well under the ~60s edge/ingress timeout. Options: use `-preset ultrafast` (currently veryfast), lower boxblur (32:12 -> 16:6), scale first then blur (blur on 480p downscaled bg is much cheaper), and start ffmpeg download simultaneously with GQL resolution using ffmpeg reading the remote URL directly (skip the local streaming download) via `-i <mp4_url>` so upload+encode overlap.",
+    "OR: switch endpoint to a job model — POST kicks off the render and returns a job id; GET /jobs/{id} polls, and GET /jobs/{id}/file streams the finished mp4 (fast). Update ClipCard to poll.",
+    "Escape/whitelist caption text before feeding to drawtext filtergraph.",
+    "Wrap download_clip body in try/finally to guarantee workdir cleanup on any failure path."
+  ],
+  "critical_code_review_comments": [
+    "resolve_clip_source() correctly uses public GQL client-id + persisted query hash for VideoAccessToken_Clip and picks the highest quality — verified end-to-end (backend log shows 200 from gql.twitch.tv and 200 from cloudfront).",
+    "download endpoint's ~60s total latency (network fetch of source mp4 + libx264 veryfast encode of a 30s clip with heavy boxblur) is right at the Cloudflare/ingress edge; must be shortened.",
+    "server.py is ~800 lines and mixes AI, ffmpeg render, GQL, OAuth, demo seeding, auto-sync loop, and HTTP routes — should be split for maintainability."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "93% (14/15 pytest, only failure is external-timeout on real download)", "frontend": "100% for the demo-toast / no-navigate check"},
+  "test_credentials": "none (no auth); pre-seeded clip id=e2e-real slug=GleamingWildCougarFUNgineer confirmed present in Mongo",
+  "seed_data_creation": "e2e-real clip already existed in Mongo; POST /api/demo/seed re-seeds 3 demo channels x 6 clips each",
+  "retest_needed": true,
+  "main_agent_can_self_test": false,
+  "context_for_next_testing_agent": "Backend endpoint is functionally correct — verified locally via `curl http://localhost:8001/api/clips/e2e-real/download` returns 200 video/mp4 and ffprobe reports 1080x1920 (see /tmp/e2ereal.mp4 test). External call via REACT_APP_BACKEND_URL gets 502 Cloudflare at ~60s. The pytest test_download_e2e_real_vertical_render targets the external URL and fails ONLY because of ingress timeout. If the main agent shortens the render (ultrafast preset + lighter blur + direct URL input to ffmpeg), re-run pytest with the same test and it should pass externally.",
+  "rca of the issue": "Original download path only worked for old-format Twitch clips whose thumbnail URL exposed '-preview' (a hack). New GQL path correctly resolves the signed CloudFront MP4 for any clip slug. Local end-to-end proves 1080x1920 output. Remaining failure is not a code bug per se but a latency/edge issue: ffmpeg re-encode of the source (~30s clip) with heavy boxblur under libx264 takes ~55-60s combined with the CloudFront fetch, which trips the Cloudflare/ingress ~60s idle timeout and the client sees an HTML 502 error page instead of the mp4."
+}

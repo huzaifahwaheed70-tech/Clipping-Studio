@@ -20,6 +20,8 @@ export const api = {
   clipNow: (id) => http.post(`/channels/${id}/clip-now`).then((r) => r.data),
   listClips: (channelId) =>
     http.get("/clips", { params: channelId ? { channel_id: channelId } : {} }).then((r) => r.data),
+  createDownloadJob: (id) => http.post(`/clips/${id}/download-jobs`).then((r) => r.data),
+  getDownloadJob: (jobId) => http.get(`/download-jobs/${jobId}`).then((r) => r.data),
   regenerate: (id) => http.post(`/clips/${id}/generate`).then((r) => r.data),
   updateClip: (id, body) => http.patch(`/clips/${id}`, body).then((r) => r.data),
   deleteClip: (id) => http.delete(`/clips/${id}`).then((r) => r.data),

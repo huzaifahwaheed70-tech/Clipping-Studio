@@ -162,9 +162,9 @@ def test_download_demo_clip_returns_400(s, seeded):
     assert "sample" in detail or "your own channel" in detail or "get clips" in detail, detail
 
 
-def test_download_e2e_vertical_render(s, tmp_path):
+def test_download_e2e_real_vertical_render(s, tmp_path):
     import subprocess, shutil as _sh
-    r = s.get(f"{API}/clips/e2e-vertical-test/download", timeout=300)
+    r = s.get(f"{API}/clips/e2e-real/download", timeout=300)
     assert r.status_code == 200, f"got {r.status_code}: {r.text[:300]}"
     ctype = r.headers.get("content-type", "")
     assert ctype.startswith("video/mp4"), ctype

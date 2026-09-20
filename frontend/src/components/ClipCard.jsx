@@ -79,13 +79,23 @@ export default function ClipCard({ clip, onUpdated, index }) {
       return;
     }
     setDownloading(true);
-    const tid = toast.loading("Rendering vertical 9:16 video…");
+    const tid = toast.loading("Rendering vertical 9:16 video… this can take up to a minute");
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     try {
-      const res = await fetch(`${API}/clips/${clip.id}/download`);
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}));
-        throw new Error(e.detail || "Download failed");
+      const { job_id } = await api.createDownloadJob(clip.id);
+      let status = "processing";
+      let tries = 0;
+      while (status === "processing" && tries < 150) {
+        await sleep(2000);
+        const s = await api.getDownloadJob(job_id);
+        status = s.status;
+        if (status === "error") throw new Error(s.error || "Render failed");
+        tries += 1;
       }
+      if (status !== "done") throw new Error("Rendering timed out — try a shorter clip");
+
+      const res = await fetch(`${API}/download-jobs/${job_id}/file`);
+      if (!res.ok) throw new Error("Rendered file was not ready");
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -97,7 +107,7 @@ export default function ClipCard({ clip, onUpdated, index }) {
       URL.revokeObjectURL(url);
       toast.success("Saved! Check your Downloads / Photos", { id: tid });
     } catch (e) {
-      toast.error(e.message || "Could not download", { id: tid });
+      toast.error(e?.response?.data?.detail || e.message || "Could not download", { id: tid });
     }
     setDownloading(false);
   };

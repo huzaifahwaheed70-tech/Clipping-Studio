@@ -531,11 +531,12 @@ def _drawtext_y(position: str) -> str:
 
 
 async def render_vertical(src: str, out: str, caption: str, overlay: dict, workdir: str):
-    """Convert a 16:9 clip to a 1080x1920 (9:16) video with a blurred fill and burned-in caption."""
-    # blurred background + centered clip
+    """Convert a 16:9 clip to a 1080x1920 (9:16) video with a blurred fill and burned-in caption.
+    `src` may be a local path OR a remote URL (ffmpeg reads it directly, overlapping fetch + encode)."""
+    # cheap blurred background: blur a tiny frame then upscale (visually identical, far faster)
     fc = (
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=32:12,setsar=1[bg];"
+        "[0:v]scale=384:216,boxblur=18:3,scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,setsar=1[bg];"
         "[0:v]scale=1080:-2:force_original_aspect_ratio=decrease[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2[v1]"
     )
@@ -549,8 +550,10 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
         fontsize = max(48, min(120, int(size * 2.6)))
         y = _drawtext_y(overlay.get("position", "bottom"))
         highlight = overlay.get("highlight", "#9146FF").lstrip("#")
+        if not re.match(r"^[0-9a-fA-F]{6}$", highlight):
+            highlight = "9146FF"
         fc += (
-            f";[v1]drawtext=textfile={cap_file}:fontfile={FONT_PATH}:"
+            f";[v1]drawtext=textfile={cap_file}:expansion=none:fontfile={FONT_PATH}:"
             f"fontcolor=white:fontsize={fontsize}:line_spacing=10:"
             f"box=1:boxcolor=black@0.55:boxborderw=26:"
             f"bordercolor=0x{highlight}@0.9:borderw=4:"
@@ -559,72 +562,94 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
         out_label = "[vout]"
 
     args = [
-        "ffmpeg", "-y", "-i", src,
+        "ffmpeg", "-y",
+        "-user_agent", "Mozilla/5.0",
+        "-i", src,
         "-filter_complex", fc,
         "-map", out_label, "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-c:a", "aac", "-b:a", "160k",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-threads", "0",
         out,
     ]
     proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=280)
     except asyncio.TimeoutError:
         proc.kill()
-        raise HTTPException(504, "Rendering the vertical video took too long. Try a shorter clip.")
+        raise RuntimeError("render timed out")
     if proc.returncode != 0:
         logger.warning(f"ffmpeg failed: {stderr.decode()[-500:]}")
-        raise HTTPException(500, "Could not render the vertical video.")
+        raise RuntimeError("ffmpeg failed")
 
 
-@api.get("/clips/{clip_id}/download")
-async def download_clip(clip_id: str):
+RENDER_DIR = "/tmp/renders"
+os.makedirs(RENDER_DIR, exist_ok=True)
+
+
+async def _prune_old_renders():
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    old = await db.render_jobs.find({"created_at": {"$lt": cutoff.isoformat()}}).to_list(500)
+    for j in old:
+        if j.get("file"):
+            try:
+                os.remove(j["file"])
+            except OSError:
+                pass
+    await db.render_jobs.delete_many({"created_at": {"$lt": cutoff.isoformat()}})
+
+
+async def _run_render_job(job_id: str, clip: dict):
+    workdir = tempfile.mkdtemp(prefix="clip_")
+    try:
+        mp4 = await resolve_clip_source(clip.get("twitch_clip_id", "")) or clip_mp4_url(clip.get("thumbnail_url", ""))
+        if not mp4:
+            await db.render_jobs.update_one({"id": job_id}, {"$set": {
+                "status": "error", "error": "Couldn't find a downloadable video file for this clip."}})
+            return
+        out = os.path.join(RENDER_DIR, f"{job_id}.mp4")
+        await render_vertical(mp4, out, clip.get("ai_caption", ""), clip.get("caption_overlay", DEFAULT_OVERLAY), workdir)
+        await db.render_jobs.update_one({"id": job_id}, {"$set": {"status": "done", "file": out}})
+    except Exception as e:
+        logger.warning(f"render job {job_id} failed: {e}")
+        await db.render_jobs.update_one({"id": job_id}, {"$set": {
+            "status": "error", "error": "Could not render this clip. Please try another."}})
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+@api.post("/clips/{clip_id}/download-jobs")
+async def create_download_job(clip_id: str):
     clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
     if not clip:
         raise HTTPException(404, "Clip not found")
     if clip.get("is_demo"):
         raise HTTPException(400, "This is a sample clip. Add your own channel and hit 'Get clips' to pull real, downloadable videos.")
-    mp4 = await resolve_clip_source(clip.get("twitch_clip_id", ""))
-    if not mp4:
-        mp4 = clip_mp4_url(clip.get("thumbnail_url", ""))
-    if not mp4:
-        raise HTTPException(400, "Couldn't find a downloadable video file for this clip.")
+    await _prune_old_renders()
+    job_id = uuid.uuid4().hex
+    await db.render_jobs.insert_one({
+        "id": job_id, "clip_id": clip_id, "status": "processing", "created_at": now_iso()})
+    asyncio.create_task(_run_render_job(job_id, clip))
+    return {"job_id": job_id}
 
-    workdir = tempfile.mkdtemp(prefix="clip_")
-    src = os.path.join(workdir, "src.mp4")
-    out = os.path.join(workdir, "vertical.mp4")
 
-    # download source
-    try:
-        async with httpx.AsyncClient(timeout=None, follow_redirects=True) as c:
-            async with c.stream("GET", mp4) as r:
-                if r.status_code != 200:
-                    shutil.rmtree(workdir, ignore_errors=True)
-                    raise HTTPException(404, "The video file could not be fetched from Twitch.")
-                with open(src, "wb") as f:
-                    async for chunk in r.aiter_bytes():
-                        f.write(chunk)
-    except HTTPException:
-        raise
-    except Exception as e:
-        shutil.rmtree(workdir, ignore_errors=True)
-        logger.warning(f"source download failed: {e}")
-        raise HTTPException(502, "Could not download the source clip.")
+@api.get("/download-jobs/{job_id}")
+async def get_download_job(job_id: str):
+    j = await db.render_jobs.find_one({"id": job_id}, {"_id": 0})
+    if not j:
+        raise HTTPException(404, "Job not found")
+    return {"status": j["status"], "error": j.get("error")}
 
-    try:
-        await render_vertical(src, out, clip.get("ai_caption", ""), clip.get("caption_overlay", DEFAULT_OVERLAY), workdir)
-    except Exception:
-        shutil.rmtree(workdir, ignore_errors=True)
-        raise
 
+@api.get("/download-jobs/{job_id}/file")
+async def get_download_job_file(job_id: str):
+    j = await db.render_jobs.find_one({"id": job_id}, {"_id": 0})
+    if not j or j.get("status") != "done" or not j.get("file") or not os.path.exists(j["file"]):
+        raise HTTPException(404, "File not ready")
+    clip = await db.clips.find_one({"id": j["clip_id"]}, {"_id": 0}) or {}
     name = re.sub(r"[^a-zA-Z0-9]+", "_", (clip.get("ai_title") or clip.get("title") or "clip")).strip("_")[:50] or "clip"
-    return FileResponse(
-        out,
-        media_type="video/mp4",
-        filename=f"{name}_9x16.mp4",
-        background=BackgroundTask(shutil.rmtree, workdir, ignore_errors=True),
-    )
+    return FileResponse(j["file"], media_type="video/mp4", filename=f"{name}_9x16.mp4")
 
 
 # -------- OAuth (create-clip capability) --------
