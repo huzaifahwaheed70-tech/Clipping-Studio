@@ -1379,25 +1379,22 @@ async def auto_sync_loop():
 
 
 async def render_worker():
-    """Gently pre-render pending clips to 9:16 in the background, ONE at a time and only
-    when the CPU is idle, so tapping Save is instant without ever starving the web server."""
-    await asyncio.sleep(25)
+    """Continuously pre-render pending clips to 9:16 in the background so every card is
+    already 'Save video' by the time the user looks. Renders ONE at a time via RENDER_SEM,
+    at `nice -n 19` with a single ffmpeg thread, so the web server always stays responsive."""
+    await asyncio.sleep(15)
     while True:
         try:
-            load1 = os.getloadavg()[0]
-            if load1 > 1.5:  # pod is CPU-capped at ~2 cores; back off under load
-                await asyncio.sleep(10)
-                continue
             clip = await db.clips.find_one(
                 {"is_demo": {"$ne": True}, "render_status": "pending"}, {"_id": 0})
             if clip:
                 await render_clip_to_store(clip["id"])
-                await asyncio.sleep(3)  # throttle between renders
+                await asyncio.sleep(1)
             else:
-                await asyncio.sleep(10)
+                await asyncio.sleep(8)
         except Exception as e:
             logger.warning(f"render_worker: {e}")
-            await asyncio.sleep(10)
+            await asyncio.sleep(8)
 
 
 async def live_monitor_loop():
