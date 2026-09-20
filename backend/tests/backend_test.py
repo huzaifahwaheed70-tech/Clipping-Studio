@@ -195,6 +195,10 @@ def test_download_e2e_real_job_flow(s, tmp_path):
     ctype = fr.headers.get("content-type", "")
     assert ctype.startswith("video/mp4"), ctype
     assert len(fr.content) > 10_000, f"video too small: {len(fr.content)} bytes"
+    # Cloudflare fix: Content-Length header MUST equal actual body length
+    clen = fr.headers.get("content-length")
+    assert clen is not None, "missing content-length header"
+    assert int(clen) == len(fr.content), f"content-length {clen} != body {len(fr.content)}"
     out = tmp_path / "vertical.mp4"
     out.write_bytes(fr.content)
     if _sh.which("ffprobe"):
