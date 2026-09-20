@@ -710,6 +710,7 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
         out_label = "[vout]"
 
     args = [
+        "nice", "-n", "19",
         "ffmpeg", "-y",
         "-user_agent", "Mozilla/5.0",
         "-i", src,
@@ -718,7 +719,7 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         "-c:a", "aac", "-b:a", "160k",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-        "-threads", "0",
+        "-threads", "1",
         out,
     ]
     proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
@@ -734,7 +735,7 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
 
 RENDER_DIR = "/tmp/renders"
 os.makedirs(RENDER_DIR, exist_ok=True)
-RENDER_SEM = asyncio.Semaphore(2)
+RENDER_SEM = asyncio.Semaphore(1)
 
 
 async def render_clip_to_store(clip_id: str):
@@ -1008,18 +1009,22 @@ async def auto_sync_loop():
 
 
 async def render_worker():
-    """Gently pre-render pending clips to 9:16 in the background, ONE at a time,
-    so tapping Save is instant — without overloading the server."""
-    await asyncio.sleep(20)
+    """Gently pre-render pending clips to 9:16 in the background, ONE at a time and only
+    when the CPU is idle, so tapping Save is instant without ever starving the web server."""
+    await asyncio.sleep(25)
     while True:
         try:
+            load1 = os.getloadavg()[0]
+            if load1 > 1.5:  # pod is CPU-capped at ~2 cores; back off under load
+                await asyncio.sleep(10)
+                continue
             clip = await db.clips.find_one(
                 {"is_demo": {"$ne": True}, "render_status": "pending"}, {"_id": 0})
             if clip:
                 await render_clip_to_store(clip["id"])
-                await asyncio.sleep(2)  # throttle between renders
+                await asyncio.sleep(3)  # throttle between renders
             else:
-                await asyncio.sleep(8)
+                await asyncio.sleep(10)
         except Exception as e:
             logger.warning(f"render_worker: {e}")
             await asyncio.sleep(10)
