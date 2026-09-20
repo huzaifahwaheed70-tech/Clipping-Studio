@@ -82,9 +82,60 @@ class SyncRequest(BaseModel):
 
 _token_cache = {"token": None, "exp": datetime.now(timezone.utc)}
 
+# Durable, disk-backed persistence so the Twitch connection + channels survive
+# database resets (there is no login, so this keeps everything shared + persistent).
+APPDATA = ROOT_DIR / ".appdata"
+APPDATA.mkdir(exist_ok=True)
+SETTINGS_FILE = APPDATA / "settings.json"
+CHANNELS_FILE = APPDATA / "channels.json"
+
+
+def _write_json(path: Path, data):
+    try:
+        path.write_text(json.dumps(data, default=str))
+    except Exception as e:
+        logger.warning(f"persist write {path.name} failed: {e}")
+
+
+def _read_json(path: Path):
+    try:
+        if path.exists():
+            return json.loads(path.read_text())
+    except Exception as e:
+        logger.warning(f"persist read {path.name} failed: {e}")
+    return None
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+async def snapshot_settings():
+    docs = await db.settings.find({}).to_list(50)
+    _write_json(SETTINGS_FILE, docs)
+
+
+async def snapshot_channels():
+    docs = await db.channels.find({}, {"_id": 0}).to_list(500)
+    _write_json(CHANNELS_FILE, docs)
+
+
+async def restore_from_disk():
+    """On startup, if the DB was reset, restore the Twitch connection + channels from disk."""
+    if await db.settings.count_documents({}) == 0:
+        data = _read_json(SETTINGS_FILE)
+        if data:
+            for d in data:
+                _id = d.get("_id")
+                if _id:
+                    d.pop("_id", None)
+                    await db.settings.update_one({"_id": _id}, {"$set": d}, upsert=True)
+            logger.info("restored Twitch settings from disk backup")
+    if await db.channels.count_documents({}) == 0:
+        data = _read_json(CHANNELS_FILE)
+        if data:
+            await db.channels.insert_many([{k: v for k, v in c.items() if k != "_id"} for c in data])
+            logger.info(f"restored {len(data)} channels from disk backup")
 
 
 async def get_creds():
@@ -262,6 +313,7 @@ async def save_twitch(creds: TwitchCreds):
     )
     _token_cache["token"] = None
     await app_token()  # validate immediately
+    await snapshot_settings()
     return {"ok": True}
 
 
@@ -306,6 +358,7 @@ async def add_channel(body: ChannelCreate):
         "created_at": now_iso(),
     }
     await db.channels.insert_one(dict(doc))
+    await snapshot_channels()
     return clean(doc)
 
 
@@ -317,6 +370,7 @@ async def update_channel(channel_id: str, body: ChannelUpdate):
     doc = await db.channels.find_one({"id": channel_id}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Channel not found")
+    await snapshot_channels()
     return doc
 
 
@@ -324,6 +378,7 @@ async def update_channel(channel_id: str, body: ChannelUpdate):
 async def delete_channel(channel_id: str):
     await db.channels.delete_one({"id": channel_id})
     await db.clips.delete_many({"channel_id": channel_id})
+    await snapshot_channels()
     return {"ok": True}
 
 
@@ -685,6 +740,7 @@ async def oauth_callback(code: str | None = None, state: str | None = None, erro
     await db.settings.update_one({"_id": "oauth"}, {"$set": {
         "access_token": t["access_token"], "refresh_token": t.get("refresh_token"),
         "updated_at": now_iso()}}, upsert=True)
+    await snapshot_settings()
     return RedirectResponse(f"{APP_PUBLIC_URL}/?twitch=connected")
 
 
@@ -771,6 +827,7 @@ async def seed_demo():
                 "created_at": now_iso(),
             }
             await db.clips.insert_one(dict(clip))
+    await snapshot_channels()
     return {"ok": True, "channels": created}
 
 
@@ -807,6 +864,7 @@ async def auto_sync_loop():
 
 @app.on_event("startup")
 async def on_startup():
+    await restore_from_disk()
     await db.channels.create_index("login")
     await db.clips.create_index("twitch_clip_id")
     asyncio.create_task(auto_sync_loop())
