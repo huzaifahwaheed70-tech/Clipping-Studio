@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Play, Copy, Sparkles, Eye, Clock, Check, SlidersHorizontal, Flame, Download, Loader2 } from "lucide-react";
+import { Play, Copy, Sparkles, Clock, Check, SlidersHorizontal, Flame, Download, Loader2, Trash2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -27,17 +27,28 @@ const POS_CLASS = {
   bottom: "bottom-3 items-end",
 };
 
-export default function ClipCard({ clip, onUpdated, index }) {
+const fmtTime = (s) => {
+  const t = Math.max(0, Math.round(s || 0));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = t % 60;
+  return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(sec).padStart(2, "0")}`;
+};
+
+export default function ClipCard({ clip, onUpdated, onDeleted, index }) {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [ov, setOv] = useState(clip.caption_overlay || {});
   const [caption, setCaption] = useState(clip.ai_caption || "");
 
   const rendered = !clip.is_demo && clip.render_status === "done";
+  const errored = clip.render_status === "error";
   const videoUrl = `${API}/clips/${clip.id}/video`;
+  const thumbSrc = clip.is_demo ? clip.thumbnail_url : `${API}/clips/${clip.id}/thumb`;
 
   const hypeColor = HYPE_COLOR[clip.hype_type] || "#9146FF";
 
@@ -69,11 +80,23 @@ export default function ClipCard({ clip, onUpdated, index }) {
   };
 
   const play = () => {
-    if (clip.is_demo || !clip.embed_url) {
-      toast.info("Sample clip — connect Twitch to load real playable clips");
+    if (!rendered) {
+      toast.info("Still preparing this clip — it'll be playable in a few seconds");
       return;
     }
     setPlaying(true);
+  };
+
+  const remove = async () => {
+    setDeleting(true);
+    try {
+      await api.deleteClip(clip.id);
+      toast.success("Clip deleted");
+      onDeleted?.(clip.id);
+    } catch {
+      toast.error("Could not delete clip");
+      setDeleting(false);
+    }
   };
 
   const save = async () => {
@@ -125,10 +148,6 @@ export default function ClipCard({ clip, onUpdated, index }) {
     toast.info("Sample clip — add your own channel and its clips render automatically");
   };
 
-  const embedSrc = clip.embed_url
-    ? `${clip.embed_url}&parent=${window.location.hostname}&autoplay=true`
-    : "";
-
   return (
     <motion.div
       layout
@@ -137,18 +156,19 @@ export default function ClipCard({ clip, onUpdated, index }) {
       style={{ animationDelay: `${(index % 6) * 55}ms` }}
     >
       <div className="relative aspect-video bg-black overflow-hidden">
-        {playing && embedSrc ? (
-          <iframe
-            title={clip.title}
-            src={embedSrc}
-            className="w-full h-full"
-            allowFullScreen
-            allow="autoplay; fullscreen"
+        {playing && rendered ? (
+          <video
+            data-testid={`clip-video-player-${clip.id}`}
+            src={videoUrl}
+            className="w-full h-full object-contain bg-black"
+            controls
+            autoPlay
+            playsInline
           />
         ) : (
           <>
             <img
-              src={clip.thumbnail_url}
+              src={thumbSrc}
               alt={clip.title}
               className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
             />
@@ -213,8 +233,9 @@ export default function ClipCard({ clip, onUpdated, index }) {
         </div>
 
         <div className="flex items-center gap-3 text-[11px] font-jb text-[#686880]">
-          <span className="flex items-center gap-1">
-            <Eye className="h-3 w-3" /> {(clip.view_count || 0).toLocaleString()}
+          <span className="flex items-center gap-1" data-testid={`clip-source-${clip.id}`}>
+            <Flame className="h-3 w-3" style={{ color: hypeColor }} />
+            {clip.source_type === "live" ? "recorded live" : `from past broadcast @ ${fmtTime(clip.start_seconds)}`}
           </span>
           {clip.game_name && <span className="truncate">· {clip.game_name}</span>}
         </div>
@@ -290,12 +311,21 @@ export default function ClipCard({ clip, onUpdated, index }) {
               {sharing ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Download className="h-4 w-4 mr-1.5" />}
               {sharing ? "Saving…" : "Save video"}
             </Button>
+          ) : errored ? (
+            <Button
+              data-testid={`download-clip-button-${clip.id}`}
+              onClick={prepare}
+              className="flex-1 h-9 bg-[#FF6B6B]/20 hover:bg-[#FF6B6B]/30 text-[#FF6B6B] text-xs font-semibold"
+              title="Rendering failed — tap to retry"
+            >
+              <RefreshCw className="h-4 w-4 mr-1.5" /> Retry
+            </Button>
           ) : (
             <Button
               data-testid={`download-clip-button-${clip.id}`}
               onClick={prepare}
               className="flex-1 h-9 bg-[#00E676]/20 hover:bg-[#00E676]/30 text-[#00E676] text-xs font-semibold"
-              title="Rendering your 9:16 clip — turns green when ready"
+              title="Recording & rendering your 9:16 clip — turns green when ready"
             >
               <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> Preparing…
             </Button>
@@ -318,6 +348,16 @@ export default function ClipCard({ clip, onUpdated, index }) {
             title="Regenerate AI copy"
           >
             <Sparkles className={`h-4 w-4 ${busy ? "animate-pulse text-[#9146FF]" : ""}`} />
+          </Button>
+          <Button
+            data-testid={`delete-clip-button-${clip.id}`}
+            onClick={remove}
+            disabled={deleting}
+            variant="outline"
+            className="h-9 w-9 p-0 bg-transparent border-[#262636] text-[#A0A0B8] hover:text-[#FF2A85] hover:border-[#FF2A85]/40 hover:bg-[#FF2A85]/10"
+            title="Delete this clip"
+          >
+            {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
           </Button>
         </div>
       </div>

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import {
-  Radio, Users, RefreshCw, Sparkles, Activity, Video, Rocket, Scissors, Menu,
+  Radio, Users, RefreshCw, Sparkles, Activity, Video, Rocket, Scissors, Menu, Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -35,7 +35,7 @@ function HypeMeter({ level }) {
   );
 }
 
-function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleHype, onClipUpdated, refresh }) {
+function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleHype, onClipUpdated, onClipDeleted, onDeleteAll, refresh }) {
   const [syncing, setSyncing] = useState(false);
   const [sampling, setSampling] = useState(false);
 
@@ -129,6 +129,16 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
               <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? "animate-spin" : ""}`} /> Get clips
             </Button>
           )}
+          {clips.length > 0 && (
+            <Button
+              onClick={() => onDeleteAll(channel.id)}
+              variant="outline"
+              className="h-9 bg-transparent border-[#FF2A85]/40 text-[#FF2A85] hover:bg-[#FF2A85]/10 text-sm"
+              data-testid={`delete-channel-clips-button-${channel.id}`}
+            >
+              <Trash2 className="h-4 w-4 mr-2" /> Delete all
+            </Button>
+          )}
         </div>
       </div>
 
@@ -137,13 +147,13 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
           <Video className="h-8 w-8 text-[#686880] mx-auto mb-3" />
           <p className="text-[#A0A0B8] text-sm">No clips yet.</p>
           <p className="text-[#686880] text-xs mt-1">
-            {channel.is_demo ? "Demo channel" : "Fetching & rendering the best clips automatically…"}
+            {channel.is_demo ? "Demo channel" : "Recording the best hype moments from past broadcasts…"}
           </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
           {clips.map((c, i) => (
-            <ClipCard key={c.id} clip={c} index={i} onUpdated={onClipUpdated} />
+            <ClipCard key={c.id} clip={c} index={i} onUpdated={onClipUpdated} onDeleted={onClipDeleted} />
           ))}
         </div>
       )}
@@ -266,6 +276,33 @@ export default function Dashboard() {
     setClips((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
   };
 
+  const onClipDeleted = (id) => {
+    setClips((prev) => prev.filter((c) => c.id !== id));
+  };
+
+  const deleteChannelClips = async (channelId) => {
+    const ch = channels.find((c) => c.id === channelId);
+    if (!window.confirm(`Delete ALL clips for ${ch?.display_name || "this channel"}? This can't be undone.`)) return;
+    try {
+      const res = await api.deleteAllClips(channelId);
+      setClips((prev) => prev.filter((c) => c.channel_id !== channelId));
+      toast.success(`Deleted ${res.deleted} clips`);
+    } catch {
+      toast.error("Could not delete clips");
+    }
+  };
+
+  const deleteAllClips = async () => {
+    if (!window.confirm("Delete ALL clips across every channel? This can't be undone.")) return;
+    try {
+      const res = await api.deleteAllClips();
+      setClips([]);
+      toast.success(`Deleted ${res.deleted} clips`);
+    } catch {
+      toast.error("Could not delete clips");
+    }
+  };
+
   const seedDemo = async () => {
     setSeeding(true);
     try {
@@ -320,6 +357,16 @@ export default function Dashboard() {
             </p>
           </div>
           <div className="ml-auto flex items-center gap-3">
+            {selectedId === "all" && clips.length > 0 && (
+              <Button
+                onClick={deleteAllClips}
+                variant="outline"
+                className="h-9 bg-transparent border-[#FF2A85]/40 text-[#FF2A85] hover:bg-[#FF2A85]/10 text-sm"
+                data-testid="delete-all-clips-button"
+              >
+                <Trash2 className="h-4 w-4 mr-2" /> Delete all clips
+              </Button>
+            )}
             <Select value={hypeFilter} onValueChange={setHypeFilter}>
               <SelectTrigger
                 data-testid="filter-hype-moments-select"
@@ -347,9 +394,10 @@ export default function Dashboard() {
                 Turn live streams into <span className="text-[#9146FF]">viral clips</span>
               </h2>
               <p className="text-[#A0A0B8] mb-8 max-w-lg mx-auto">
-                Add any Twitch channel — no login needed. StreamClip AI grabs its best hype, creepy and
-                clutch moments, writes viral titles, hashtags and on-video captions, and hands you a
-                ready 9:16 video to save to your phone.
+                Add any Twitch channel — no login needed. StreamClip AI records the best moments from
+                their live streams and past broadcasts, catches exactly where the chat blows up, writes
+                viral titles, hashtags and on-video captions, and hands you a ready 9:16 video to save
+                to your phone.
               </p>
               <div className="flex items-center justify-center gap-3">
                 <Button
@@ -389,6 +437,8 @@ export default function Dashboard() {
                 onLimit={setLimit}
                 onSampleHype={sampleHype}
                 onClipUpdated={onClipUpdated}
+                onClipDeleted={onClipDeleted}
+                onDeleteAll={deleteChannelClips}
                 refresh={loadClips}
               />
             ))

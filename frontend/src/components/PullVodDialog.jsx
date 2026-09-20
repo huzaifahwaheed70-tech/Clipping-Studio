@@ -43,7 +43,8 @@ export default function PullVodDialog({ channel, onPulled }) {
         <DialogHeader>
           <DialogTitle className="font-outfit text-xl">Pull from past broadcasts</DialogTitle>
           <DialogDescription className="text-[#A0A0B8]">
-            Grab the top-performing clips from {channel.display_name}'s past streams and auto-title them.
+            Scan {channel.display_name}'s past broadcasts, cut the moments where chat went wild, and
+            render them into ready-to-post 9:16 videos.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">

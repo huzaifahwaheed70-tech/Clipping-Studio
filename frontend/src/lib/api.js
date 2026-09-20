@@ -26,6 +26,8 @@ export const api = {
   regenerate: (id) => http.post(`/clips/${id}/generate`).then((r) => r.data),
   updateClip: (id, body) => http.patch(`/clips/${id}`, body).then((r) => r.data),
   deleteClip: (id) => http.delete(`/clips/${id}`).then((r) => r.data),
+  deleteAllClips: (channelId) =>
+    http.delete("/clips", { params: channelId ? { channel_id: channelId } : {} }).then((r) => r.data),
   seedDemo: () => http.post("/demo/seed").then((r) => r.data),
 };
 
