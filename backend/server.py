@@ -763,6 +763,23 @@ async def render_clip_to_store(clip_id: str):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+@api.post("/clips/{clip_id}/prepare")
+async def prepare_clip(clip_id: str):
+    """Kick off (or report) the background 9:16 render so Save becomes instant."""
+    clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
+    if not clip:
+        raise HTTPException(404, "Clip not found")
+    if clip.get("is_demo"):
+        raise HTTPException(400, "This is a sample clip.")
+    status = clip.get("render_status")
+    if status == "done" and clip.get("render_file") and os.path.exists(clip["render_file"]):
+        return {"render_status": "done"}
+    if status != "rendering":
+        await db.clips.update_one({"id": clip_id}, {"$set": {"render_status": "pending"}})
+        asyncio.create_task(render_clip_to_store(clip_id))
+    return {"render_status": "rendering"}
+
+
 @api.get("/clips/{clip_id}/video")
 async def get_clip_video(clip_id: str):
     """Serve the ready-to-save 9:16 MP4 (renders on-demand if not cached yet)."""

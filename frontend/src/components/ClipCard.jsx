@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Play, Copy, Sparkles, Eye, Clock, Check, SlidersHorizontal, Flame, Download, Loader2, Share2 } from "lucide-react";
+import { Play, Copy, Sparkles, Eye, Clock, Check, SlidersHorizontal, Flame, Download, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -76,35 +76,49 @@ export default function ClipCard({ clip, onUpdated, index }) {
     setPlaying(true);
   };
 
-  const share = async () => {
+  const save = async () => {
     setSharing(true);
-    const tid = toast.loading("Getting your video ready to share…");
+    const tid = toast.loading("Getting your video…");
     try {
       const res = await fetch(videoUrl);
-      if (!res.ok) throw new Error("Video not ready yet — give it a few seconds");
+      if (!res.ok) throw new Error("Video not ready — give it a few seconds");
       const blob = await res.blob();
-      const file = new File([blob], `${clip.channel_login || "clip"}_9x16.mp4`, { type: "video/mp4" });
-      const text = `${clip.ai_title}\n${(clip.ai_hashtags || []).join(" ")}`;
+      const fname = `${(clip.ai_title || clip.channel_login || "clip").replace(/[^a-zA-Z0-9]+/g, "_").slice(0, 40)}_9x16.mp4`;
+      const file = new File([blob], fname, { type: "video/mp4" });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         toast.dismiss(tid);
-        await navigator.share({ files: [file], title: clip.ai_title, text });
-        toast.success("Choose 'Save Video' to add it to your Photos");
+        try {
+          await navigator.share({ files: [file], title: clip.ai_title });
+          toast.success("Now tap 'Save Video' to add it to your Photos");
+        } catch (err) {
+          if (!err || err.name !== "AbortError") downloadBlob(file);
+        }
       } else {
-        const url = URL.createObjectURL(file);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = file.name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
+        downloadBlob(file);
         toast.success("Saved! Check your Downloads / Photos", { id: tid });
       }
     } catch (e) {
-      if (e && e.name === "AbortError") { toast.dismiss(tid); }
-      else toast.error(e.message || "Could not share", { id: tid });
+      toast.error(e.message || "Could not save", { id: tid });
     }
     setSharing(false);
+  };
+
+  const downloadBlob = (file) => {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const prepare = async () => {
+    toast.message("Getting your 9:16 clip ready — the button turns green in a few seconds");
+    try {
+      await api.prepare(clip.id);
+    } catch (_) {}
   };
 
   const onDemoClick = () => {
@@ -265,34 +279,26 @@ export default function ClipCard({ clip, onUpdated, index }) {
             >
               <Download className="h-4 w-4 mr-1.5" /> Sample
             </Button>
+          ) : rendered ? (
+            <Button
+              data-testid={`download-clip-button-${clip.id}`}
+              onClick={save}
+              disabled={sharing}
+              className="flex-1 h-9 bg-[#00E676] hover:bg-[#00c765] text-black text-xs font-bold"
+              title="Save the 9:16 video to your phone"
+            >
+              {sharing ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : <Download className="h-4 w-4 mr-1.5" />}
+              {sharing ? "Saving…" : "Save video"}
+            </Button>
           ) : (
-            <>
-              <a
-                data-testid={`download-clip-button-${clip.id}`}
-                href={videoUrl}
-                download={`${clip.channel_login || "clip"}_9x16.mp4`}
-                className={`flex-1 h-9 rounded-md text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors ${
-                  rendered
-                    ? "bg-[#00E676] hover:bg-[#00c765] text-black"
-                    : "bg-[#00E676]/25 hover:bg-[#00E676]/40 text-[#00E676]"
-                }`}
-                title={rendered ? "Save the 9:16 video (ready)" : "Preparing 9:16… tap to save now"}
-                onClick={() => toast.message(rendered ? "Saving your 9:16 video…" : "Making your 9:16 clip, a few seconds…")}
-              >
-                {rendered ? <Download className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
-                {rendered ? "Save video" : "Preparing…"}
-              </a>
-              <Button
-                data-testid={`share-clip-button-${clip.id}`}
-                onClick={share}
-                disabled={sharing}
-                variant="outline"
-                className="h-9 w-9 p-0 bg-transparent border-[#00E676]/40 text-[#00E676] hover:bg-[#00E676]/10"
-                title="Open your phone's share menu (save to Photos)"
-              >
-                {sharing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Share2 className="h-4 w-4" />}
-              </Button>
-            </>
+            <Button
+              data-testid={`download-clip-button-${clip.id}`}
+              onClick={prepare}
+              className="flex-1 h-9 bg-[#00E676]/20 hover:bg-[#00E676]/30 text-[#00E676] text-xs font-semibold"
+              title="Rendering your 9:16 clip — turns green when ready"
+            >
+              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> Preparing…
+            </Button>
           )}
 
           <Button
