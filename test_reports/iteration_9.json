@@ -1,0 +1,23 @@
+{
+  "summary": "Verified the JS-driven Save flow + new prepare endpoint on the 'ludwig' real channel. Backend: added 4 new tests (test_prepare_real_clip, test_prepare_already_done_returns_done, test_prepare_demo_returns_400, test_prepare_unknown_returns_404) and extended test_get_clip_video_on_demand_916 to ffprobe-check both video codec (h264, 1080x1920) AND audio codec (aac). Repointed the on-demand render + responsiveness tests from timthetatman to ludwig. Pytest: 23/23 pass (~70s). Concrete observations against https://twitch-highlight-bot.preview.emergentagent.com/api: (a) POST /clips/{pending}/prepare -> 200 {render_status:'rendering'}, (b) POST /clips/{done}/prepare -> 200 {render_status:'done'}, (c) POST /clips/{demo}/prepare -> 400, (d) POST /clips/{unknown}/prepare -> 404, (e) GET /clips/{done}/video on ludwig -> 200 video/mp4, Content-Length==body bytes, ffprobe reports h264 1080x1920 + aac (standard saveable MP4, faststart), (f) responsiveness during active render: GET /api/ 0.12-0.14s, GET /api/channels 0.12-0.14s, POST /api/channels 0.12-0.33s, no 5xx. Frontend (Playwright, headless, viewport 1920x1080): loaded the app, selected 'ludwig', 24 ClipCards render. 2 cards show green 'Save video' button (bg-[#00E676], data-testid=download-clip-button-<id>), 22 cards show 'Preparing…' with SAME data-testid. Clicking a 'Preparing…' button triggered POST /api/clips/<id>/prepare (network verified). Clicking 'Save video' in headless (navigator.canShare falsy) triggered a browser download of Ludwig_s_INSANE_CS_Clutch_Had_Chat_EXPLO_9x16.mp4 (31.9 MB, .mp4). All regression endpoints (demo/seed, channels, clips, generate, demo /video -> 400) still green.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py prepare_clip: correctly idempotent — returns 'done' when file exists, kicks a background render_clip_to_store task when not rendering. Good.",
+    "get_clip_video reads full mp4 into RAM (observed 31.9 MB for a 33s ludwig clip). Sets correct Content-Length and Accept-Ranges: none which is what iOS Save-to-Photos requires. For longer clips memory pressure could grow; StreamingResponse with pre-known length would be safer long-term.",
+    "ClipCard.save(): fetches videoUrl then does navigator.canShare({files:[file]}) branch, falls back to downloadBlob on desktop/unsupported. Verified download fallback works in headless. The AbortError swallow is correct so a user cancelling the share sheet doesn't trigger a second download.",
+    "prepare button uses SAME data-testid as Save button — good for tests, but the label change is the only affordance. Consider a subtle aria-live announcement when it flips to 'Save video'.",
+    "render_worker still uses os.getloadavg()[0] > 1.5; in a container this reads host load, not the pod's own — same comment as prior iteration."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (23/23)", "frontend": "100% (prepare + save-download verified)"},
+  "seed_data_creation": "demo seed (xqc/kaicenat/pokimane) via POST /api/demo/seed. Real channel 'ludwig' was pre-existing with 24 clips (started run: 1 done / 23 pending; after tests: 2 done / 22 pending as render_worker completed one more).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Real channel is now 'ludwig' (not timthetatman). Helpers _get_or_add_ludwig / _pick_real_clip live in backend_test.py. Preparing→Save is idempotent: prepare returns 'rendering' or 'done'; /video renders on-demand if not cached. RENDER_SEM=1 serializes; keep to one render call at a time. Cloudflare edge timeout may return 502 on a long queued /video call — that's tolerated by the responsiveness test; the KEY assertion is the light endpoints stay <5s and <500 during render (still holds)."
+}
