@@ -9,6 +9,9 @@ export const api = {
   getSettings: () => http.get("/settings").then((r) => r.data),
   saveTwitch: (client_id, client_secret) =>
     http.post("/settings/twitch", { client_id, client_secret }).then((r) => r.data),
+  saveBuffer: (api_key) =>
+    http.post("/settings/buffer", { api_key }).then((r) => r.data),
+  getBufferChannels: () => http.get("/settings/buffer/channels").then((r) => r.data),
   listChannels: () => http.get("/channels").then((r) => r.data),
   addChannel: (url) => http.post("/channels", { url }).then((r) => r.data),
   updateChannel: (id, body) => http.patch(`/channels/${id}`, body).then((r) => r.data),
@@ -21,6 +24,7 @@ export const api = {
   listClips: (channelId) =>
     http.get("/clips", { params: channelId ? { channel_id: channelId } : {} }).then((r) => r.data),
   prepare: (id) => http.post(`/clips/${id}/prepare`).then((r) => r.data),
+  postToBuffer: (id) => http.post(`/clips/${id}/post-to-buffer`).then((r) => r.data),
   createDownloadJob: (id) => http.post(`/clips/${id}/download-jobs`).then((r) => r.data),
   getDownloadJob: (jobId) => http.get(`/download-jobs/${jobId}`).then((r) => r.data),
   regenerate: (id) => http.post(`/clips/${id}/generate`).then((r) => r.data),
