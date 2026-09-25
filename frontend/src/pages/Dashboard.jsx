@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import {
-  Radio, Users, RefreshCw, Sparkles, Activity, Video, Rocket, Scissors, Menu, Trash2,
+  Radio, Users, RefreshCw, Sparkles, Activity, Video, Rocket, Scissors, Menu, Trash2, Send, Check,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -35,7 +35,90 @@ function HypeMeter({ level }) {
   );
 }
 
-function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleHype, onClipUpdated, onClipDeleted, onDeleteAll, refresh }) {
+function BufferDestinationsPicker({ channel, onUpdated }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [options, setOptions] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const selected = channel.buffer_channels || [];
+
+  const togglePicker = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next && options.length === 0) {
+      setLoading(true);
+      try {
+        const opts = await api.getBufferChannels();
+        setOptions(opts);
+      } catch {
+        toast.error("Connect Buffer in Settings first, then fetch your accounts there.");
+      }
+      setLoading(false);
+    }
+  };
+
+  const isSelected = (opt) => selected.some((s) => s.channel_id === opt.channel_id);
+
+  const toggleDestination = async (opt) => {
+    let next;
+    if (isSelected(opt)) {
+      next = selected.filter((s) => s.channel_id !== opt.channel_id);
+    } else {
+      next = [...selected, { platform: opt.platform, channel_id: opt.channel_id, max_posts_per_day: 12 }];
+    }
+    setSaving(true);
+    try {
+      const updated = await api.updateChannel(channel.id, { buffer_channels: next });
+      onUpdated(updated);
+      toast.success(isSelected(opt) ? "Removed destination" : "Clips from this channel will post there");
+    } catch {
+      toast.error("Could not update posting destinations");
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div className="relative">
+      <Button
+        onClick={togglePicker}
+        variant="outline"
+        className="h-9 bg-transparent border-[#262636] text-white hover:bg-[#1A1A26] text-sm"
+        data-testid={`buffer-destinations-button-${channel.id}`}
+      >
+        <Send className="h-4 w-4 mr-2" />
+        Post to{selected.length > 0 ? ` (${selected.length})` : ""}
+      </Button>
+      {open && (
+        <div className="absolute right-0 mt-2 w-64 rounded-lg bg-[#12121A] border border-[#262636] shadow-xl z-20 p-2 space-y-1 max-h-64 overflow-y-auto">
+          {loading ? (
+            <p className="text-xs text-[#686880] p-2">Loading…</p>
+          ) : options.length === 0 ? (
+            <p className="text-xs text-[#686880] p-2 leading-relaxed">
+              No Buffer accounts found. Connect Buffer and click "Fetch my connected accounts" in Settings first.
+            </p>
+          ) : (
+            options.map((opt) => (
+              <button
+                key={opt.channel_id}
+                onClick={() => toggleDestination(opt)}
+                disabled={saving}
+                className="w-full flex items-center justify-between text-left text-xs font-jb px-2 py-1.5 rounded hover:bg-[#1A1A26] text-[#A0A0B8] transition-colors"
+              >
+                <span className="truncate">{opt.name || opt.channel_id}</span>
+                <span className="flex items-center gap-1.5 shrink-0 ml-2">
+                  <span className="text-[10px] uppercase text-[#00F0FF]">{opt.platform}</span>
+                  {isSelected(opt) && <Check className="h-3.5 w-3.5 text-[#00E676]" />}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleHype, onClipUpdated, onClipDeleted, onDeleteAll, onChannelUpdated, refresh }) {
   const [syncing, setSyncing] = useState(false);
   const [sampling, setSampling] = useState(false);
 
@@ -132,6 +215,9 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
             >
               <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? "animate-spin" : ""}`} /> Get clips
             </Button>
+          )}
+          {!channel.is_demo && (
+            <BufferDestinationsPicker channel={channel} onUpdated={onChannelUpdated} />
           )}
           {clips.length > 0 && (
             <Button
@@ -282,6 +368,10 @@ export default function Dashboard() {
 
   const onClipDeleted = (id) => {
     setClips((prev) => prev.filter((c) => c.id !== id));
+  };
+
+  const onChannelUpdated = (updated) => {
+    setChannels((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
   };
 
   const deleteChannelClips = async (channelId) => {
@@ -443,6 +533,7 @@ export default function Dashboard() {
                 onClipUpdated={onClipUpdated}
                 onClipDeleted={onClipDeleted}
                 onDeleteAll={deleteChannelClips}
+                onChannelUpdated={onChannelUpdated}
                 refresh={loadClips}
               />
             ))
