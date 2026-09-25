@@ -65,10 +65,17 @@ class ChannelCreate(BaseModel):
     url: str
 
 
+class BufferChannelConfig(BaseModel):
+    platform: str          # "tiktok", "instagram", "youtube", etc.
+    channel_id: str        # Buffer's channel ID for that connected account
+    max_posts_per_day: int = 12   # stay safely under TikTok's ~15/day cap
+
+
 class ChannelUpdate(BaseModel):
     clips_per_day: int | None = None
     auto_clip: bool | None = None
     caption_overlay: dict | None = None
+    buffer_channels: list[BufferChannelConfig] | None = None
 
 
 class ClipUpdate(BaseModel):
@@ -78,6 +85,10 @@ class ClipUpdate(BaseModel):
 
 class SyncRequest(BaseModel):
     period_days: int = 1
+
+
+class BufferSettingsIn(BaseModel):
+    api_key: str
 
 
 # ---------------- Helpers ----------------
@@ -180,6 +191,125 @@ async def helix(path, params=None):
     if r.status_code != 200:
         raise HTTPException(502, f"Twitch API error: {r.text[:200]}")
     return r.json()
+
+
+# ---------------- Buffer auto-posting ----------------
+
+BUFFER_GQL_URL = "https://api.buffer.com"
+
+CREATE_POST_MUTATION = """
+mutation CreatePost($input: CreatePostInput!) {
+  createPost(input: $input) {
+    ... on PostActionSuccess {
+      post { id }
+    }
+    ... on MutationError {
+      message
+    }
+  }
+}
+"""
+
+
+async def buffer_graphql(api_key: str, query: str, variables: dict):
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(
+            BUFFER_GQL_URL,
+            json={"query": query, "variables": variables},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        )
+    r.raise_for_status()
+    return r.json()
+
+
+async def posts_today_count(channel_id: str) -> int:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    return await db.buffer_posts.count_documents({
+        "channel_id": channel_id,
+        "created_at": {"$gte": cutoff},
+    })
+
+
+def clip_video_public_url(clip_id: str) -> str:
+    return f"{APP_PUBLIC_URL}/api/clips/{clip_id}/video"
+
+
+async def queue_clip_to_buffer(clip: dict, channel: dict, api_key: str):
+    text = (clip.get("ai_title") or clip.get("title") or "").strip()
+    hashtags = " ".join(clip.get("ai_hashtags") or [])
+    if hashtags:
+        text = f"{text}\n\n{hashtags}"
+
+    video_url = clip_video_public_url(clip["id"])
+    variables = {
+        "input": {
+            "text": text,
+            "channelId": channel["channel_id"],
+            "schedulingType": "automatic",
+            "mode": "addToQueue",
+            "assets": [{"video": {"url": video_url}}],
+        }
+    }
+    try:
+        resp = await buffer_graphql(api_key, CREATE_POST_MUTATION, variables)
+        result = (resp.get("data") or {}).get("createPost") or {}
+        if result.get("message"):
+            raise RuntimeError(result["message"])
+        post_id = ((result.get("post") or {}).get("id"))
+        await db.buffer_posts.insert_one({
+            "id": str(uuid.uuid4()),
+            "clip_id": clip["id"],
+            "platform": channel["platform"],
+            "channel_id": channel["channel_id"],
+            "buffer_post_id": post_id,
+            "created_at": now_iso(),
+        })
+        await db.clips.update_one(
+            {"id": clip["id"]},
+            {"$addToSet": {"buffer_posted_channels": channel["channel_id"]}},
+        )
+        logger.info(f"queued clip {clip['id']} to Buffer ({channel['platform']})")
+    except Exception as e:
+        logger.warning(f"buffer post failed for clip {clip['id']} on {channel['platform']}: {e}")
+        await db.clips.update_one(
+            {"id": clip["id"]},
+            {"$set": {f"buffer_error.{channel['channel_id']}": str(e)}},
+        )
+
+
+async def buffer_sync_loop():
+    """Every few minutes, for each Twitch channel that has its own configured
+    posting accounts, queue that channel's oldest not-yet-posted rendered clip
+    to each of its destinations, respecting each destination's daily cap."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            settings = await db.settings.find_one({"_id": "buffer"})
+            api_key = settings.get("api_key") if settings else None
+            if api_key:
+                channels = await db.channels.find({
+                    "is_demo": {"$ne": True},
+                    "buffer_channels": {"$exists": True, "$ne": []},
+                }).to_list(200)
+                for ch in channels:
+                    for dest in ch.get("buffer_channels", []):
+                        count = await posts_today_count(dest["channel_id"])
+                        if count >= dest.get("max_posts_per_day", 12):
+                            continue
+                        clip = await db.clips.find_one(
+                            {
+                                "channel_id": ch["id"],
+                                "render_status": "done",
+                                "buffer_posted_channels": {"$ne": dest["channel_id"]},
+                            },
+                            sort=[("created_at", 1)],
+                        )
+                        if clip:
+                            await queue_clip_to_buffer(clip, dest, api_key)
+                            await asyncio.sleep(5)
+        except Exception as e:
+            logger.warning(f"buffer_sync_loop: {e}")
+        await asyncio.sleep(300)  # check every 5 minutes
 
 
 def parse_login(url: str) -> str:
@@ -528,7 +658,7 @@ async def _make_poster(video_path: str, out: str):
 
 async def _store_vod_clips(ch: dict, vods: list, need: int):
     if need <= 0:
-        need = ch.get("clips_per_day", 24)
+        need = ch.get("clips_per_day", 20)
     out = []
     ai_sem = asyncio.Semaphore(4)
     usable = [v for v in vods if v["length"] > 180][:3] or vods[:3]
@@ -656,11 +786,13 @@ async def get_settings():
     doc = await db.settings.find_one({"_id": "twitch"})
     cid, csec = await get_creds()
     oauth = await db.settings.find_one({"_id": "oauth"})
+    buffer_doc = await db.settings.find_one({"_id": "buffer"})
     return {
         "twitch_configured": bool(cid and csec),
         "client_id_preview": (cid[:6] + "..." if cid else ""),
         "oauth_connected": bool(oauth and oauth.get("access_token")),
         "redirect_uri": REDIRECT_URI,
+        "buffer_configured": bool(buffer_doc and buffer_doc.get("api_key")),
     }
 
 
@@ -674,6 +806,75 @@ async def save_twitch(creds: TwitchCreds):
     _token_cache["token"] = None
     await app_token()  # validate immediately
     await snapshot_settings()
+    return {"ok": True}
+
+
+@api.post("/settings/buffer")
+async def save_buffer_settings(body: BufferSettingsIn):
+    await db.settings.update_one(
+        {"_id": "buffer"},
+        {"$set": {"api_key": body.api_key.strip(), "updated_at": now_iso()}},
+        upsert=True,
+    )
+    await snapshot_settings()
+    return {"ok": True}
+
+
+@api.get("/settings/buffer/channels")
+async def list_buffer_channels():
+    """Fetch the user's connected Buffer channels (TikTok/Instagram/YouTube/etc.)
+    so the frontend can show a picker instead of asking for raw channel IDs."""
+    settings = await db.settings.find_one({"_id": "buffer"})
+    if not settings or not settings.get("api_key"):
+        raise HTTPException(400, "Connect Buffer first — add your API key above.")
+    api_key = settings["api_key"]
+
+    org_query = "query { account { organizations { id name } } }"
+    org_resp = await buffer_graphql(api_key, org_query, {})
+    orgs = (((org_resp.get("data") or {}).get("account") or {}).get("organizations")) or []
+    if not orgs:
+        raise HTTPException(502, "Buffer returned no organizations for this account.")
+
+    channels_query = """
+    query GetChannels($organizationId: OrganizationId!) {
+      channels(input: { organizationId: $organizationId }) {
+        id
+        name
+        service
+      }
+    }
+    """
+    all_channels = []
+    for org in orgs:
+        resp = await buffer_graphql(api_key, channels_query, {"organizationId": org["id"]})
+        chans = (resp.get("data") or {}).get("channels") or []
+        for c in chans:
+            all_channels.append({
+                "channel_id": c["id"],
+                "name": c.get("name", ""),
+                "platform": c.get("service", ""),
+                "organization": org.get("name", ""),
+            })
+    return all_channels
+
+
+@api.post("/clips/{clip_id}/post-to-buffer")
+async def post_clip_now(clip_id: str):
+    """Manually queue one clip to all Buffer destinations configured on its channel, right now."""
+    clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
+    if not clip:
+        raise HTTPException(404, "Clip not found")
+    if clip.get("render_status") != "done":
+        raise HTTPException(400, "Clip isn't rendered yet.")
+    settings = await db.settings.find_one({"_id": "buffer"})
+    if not settings or not settings.get("api_key"):
+        raise HTTPException(400, "Connect Buffer first (Settings).")
+    ch = await db.channels.find_one({"id": clip["channel_id"]})
+    dests = (ch or {}).get("buffer_channels") or []
+    if not dests:
+        raise HTTPException(400, "This channel has no Buffer destinations configured yet.")
+    for dest in dests:
+        await queue_clip_to_buffer(clip, dest, settings["api_key"])
     return {"ok": True}
 
 
@@ -703,7 +904,7 @@ async def add_channel(body: ChannelCreate):
         "twitch_user_id": user.get("id"),
         "avatar_url": user.get("profileImageURL") or "",
         "description": user.get("description") or "",
-        "clips_per_day": 24,
+        "clips_per_day": 20,
         "auto_clip": True,
         "caption_overlay": dict(DEFAULT_OVERLAY),
         "is_demo": False,
@@ -814,7 +1015,7 @@ async def auto_pull_channel(ch: dict, period: str = None):
     """Record the channel's best moments from its past broadcasts (credential-free).
     Rendering to 9:16 happens in the background so Save is instant."""
     try:
-        limit = ch.get("clips_per_day", 24)
+        limit = ch.get("clips_per_day", 20)
         existing = await db.clips.count_documents({"channel_id": ch["id"]})
         if existing >= limit:
             return []
@@ -840,7 +1041,7 @@ async def sync_clips(channel_id: str, body: SyncRequest):
         raise HTTPException(502, "Couldn't reach Twitch right now. Try again in a moment.")
     if not vods:
         raise HTTPException(404, f"{ch.get('display_name') or ch['login']} has no past broadcasts available to clip from. Twitch only keeps VODs for a limited time.")
-    limit = ch.get("clips_per_day", 24)
+    limit = ch.get("clips_per_day", 20)
     existing = await db.clips.count_documents({"channel_id": channel_id})
     need = max(limit - existing, limit)
     stored = await _store_vod_clips(ch, vods, need)
@@ -869,7 +1070,7 @@ async def pull_vod(channel_id: str, days: int = Query(30)):
         raise HTTPException(502, "Couldn't reach Twitch right now. Try again in a moment.")
     if not vods:
         raise HTTPException(404, f"{ch.get('display_name') or ch['login']} has no past broadcasts available to clip from.")
-    limit = ch.get("clips_per_day", 24)
+    limit = ch.get("clips_per_day", 20)
     stored = await _store_vod_clips(ch, vods, limit)
     return {"fetched": len(vods), "stored": len(stored), "clips": stored}
 
@@ -1055,7 +1256,7 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
 
 RENDER_DIR = "/tmp/renders"
 os.makedirs(RENDER_DIR, exist_ok=True)
-RENDER_SEM = asyncio.Semaphore(1)
+RENDER_SEM = asyncio.Semaphore(3)
 
 
 async def render_clip_to_store(clip_id: str):
@@ -1320,7 +1521,7 @@ async def seed_demo():
             "twitch_user_id": None,
             "avatar_url": DEMO_IMAGES[i % len(DEMO_IMAGES)],
             "description": "Demo channel with sample clips.",
-            "clips_per_day": 24,
+            "clips_per_day": 20,
             "auto_clip": True,
             "caption_overlay": dict(DEFAULT_OVERLAY),
             "is_demo": True,
@@ -1380,15 +1581,15 @@ async def auto_sync_loop():
 
 async def render_worker():
     """Continuously pre-render pending clips to 9:16 in the background so every card is
-    already 'Save video' by the time the user looks. Renders ONE at a time via RENDER_SEM,
-    at `nice -n 19` with a single ffmpeg thread, so the web server always stays responsive."""
+    already 'Save video' by the time the user looks. Renders up to RENDER_SEM concurrently,
+    each at `nice -n 19` with a single ffmpeg thread, so the web server stays responsive."""
     await asyncio.sleep(15)
     while True:
         try:
             clip = await db.clips.find_one(
                 {"is_demo": {"$ne": True}, "render_status": "pending"}, {"_id": 0})
             if clip:
-                await render_clip_to_store(clip["id"])
+                asyncio.create_task(render_clip_to_store(clip["id"]))
                 await asyncio.sleep(1)
             else:
                 await asyncio.sleep(8)
@@ -1455,6 +1656,7 @@ async def on_startup():
     asyncio.create_task(auto_sync_loop())
     asyncio.create_task(render_worker())
     asyncio.create_task(live_monitor_loop())
+    asyncio.create_task(buffer_sync_loop())
 
 
 app.include_router(api)
