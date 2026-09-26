@@ -7,13 +7,15 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { api, startOAuth } from "@/lib/api";
+import { api, startOAuth, API } from "@/lib/api";
 
 export default function SettingsDialog({ open, onOpenChange, settings, onSaved }) {
   const [clientId, setClientId] = useState("");
   const [secret, setSecret] = useState("");
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  const redirectUrl = settings?.redirect_uri || `${API}/auth/twitch/callback`;
 
   // --- Buffer state ---
   const [bufferKey, setBufferKey] = useState("");
@@ -38,7 +40,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSaved }
   };
 
   const copyRedirect = () => {
-    navigator.clipboard.writeText(settings?.redirect_uri || "");
+    navigator.clipboard.writeText(redirectUrl);
     setCopied(true);
     toast.success("Redirect URL copied");
     setTimeout(() => setCopied(false), 1500);
@@ -105,8 +107,8 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSaved }
           </ol>
 
           <div className="flex items-center gap-2 rounded-lg bg-[#0B0B12] border border-[#262636] p-2">
-            <code className="flex-1 text-[11px] font-jb text-[#00F0FF] break-all">
-              {settings?.redirect_uri}
+            <code className="flex-1 text-[11px] font-jb text-[#00F0FF] break-all" data-testid="twitch-redirect-url">
+              {redirectUrl}
             </code>
             <Button onClick={copyRedirect} variant="outline" className="h-8 w-8 p-0 bg-transparent border-[#262636] shrink-0">
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
