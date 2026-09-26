@@ -1,11 +1,10 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import {
-  Radio, Users, RefreshCw, Sparkles, Activity, Video, Rocket, Scissors, Menu, Trash2, Send, Check,
+  Radio, Users, RefreshCw, Sparkles, Activity, Video, Scissors, Menu, Trash2, Send, Check,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -126,15 +125,18 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
     setSyncing(true);
     try {
       const res = await onSync(channel.id);
-      if (res.stored > 0) {
-        toast.success(`Recorded ${res.stored} new hype moments`);
+      if (res?.stored > 0) {
+        toast.success(`Found ${res.stored} new moments from the latest livestream`);
       } else {
-        toast.info("You already have the latest moments from this channel's broadcasts");
+        toast.info("No new moments were found in the latest livestream");
       }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Couldn't grab clips");
+      console.error("Get clips failed:", e);
+      const detail = e?.response?.data?.detail || e?.message || "Couldn't grab clips";
+      toast.error(detail);
+    } finally {
+      setSyncing(false);
     }
-    setSyncing(false);
   };
 
   const doSample = async () => {
@@ -182,19 +184,7 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
 
         <div className="flex flex-wrap items-center gap-2 ml-auto">
           {hype != null && <HypeMeter level={hype} />}
-          <div className="flex items-center gap-1.5 rounded-lg bg-[#12121A] border border-[#262636] px-2 h-9">
-            <span className="text-[10px] font-jb text-[#686880] uppercase">Clips/day</span>
-            <Input
-              data-testid={`channel-clips-limit-input-${channel.id}`}
-              type="number"
-              min={1}
-              max={100}
-              value={channel.clips_per_day}
-              onChange={(e) => onLimit(channel.id, parseInt(e.target.value || "1", 10))}
-              className="h-7 w-14 bg-transparent border-0 text-white text-sm p-0 focus-visible:ring-0"
-            />
-          </div>
-          {live?.is_live && !channel.is_demo && (
+          {live?.is_live && (
             <Button
               onClick={doSample}
               disabled={sampling}
@@ -205,8 +195,8 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
               <Activity className={`h-4 w-4 mr-2 ${sampling ? "animate-pulse" : ""}`} /> Read chat
             </Button>
           )}
-          {!channel.is_demo && <PullVodDialog channel={channel} onPulled={refresh} />}
-          {!channel.is_demo && (
+          <PullVodDialog channel={channel} onPulled={refresh} />
+          {(
             <Button
               onClick={doSync}
               disabled={syncing}
@@ -216,7 +206,7 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
               <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? "animate-spin" : ""}`} /> Get clips
             </Button>
           )}
-          {!channel.is_demo && (
+          {(
             <BufferDestinationsPicker channel={channel} onUpdated={onChannelUpdated} />
           )}
           {clips.length > 0 && (
@@ -237,7 +227,7 @@ function ChannelSection({ channel, live, hype, clips, onSync, onLimit, onSampleH
           <Video className="h-8 w-8 text-[#686880] mx-auto mb-3" />
           <p className="text-[#A0A0B8] text-sm">No clips yet.</p>
           <p className="text-[#686880] text-xs mt-1">
-            {channel.is_demo ? "Demo channel" : "Recording the best hype moments from past broadcasts…"}
+            Recording the best hype moments from real Twitch broadcasts…
           </p>
         </div>
       ) : (
@@ -260,7 +250,6 @@ export default function Dashboard() {
   const [selectedId, setSelectedId] = useState("all");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [hypeFilter, setHypeFilter] = useState("all");
-  const [seeding, setSeeding] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
 
   const loadSettings = useCallback(async () => {
@@ -301,7 +290,15 @@ export default function Dashboard() {
       await loadClips();
       await refreshLive(chs);
     })();
-    const poll = setInterval(() => { loadClips(); }, 6000);
+    const poll = setInterval(async () => {
+      await loadClips();
+      try {
+        const chs = await loadChannels();
+        await refreshLive(chs);
+      } catch (e) {
+        console.warn("Live refresh failed:", e);
+      }
+    }, 30000);
     const params = new URLSearchParams(window.location.search);
     if (params.get("twitch") === "connected") {
       toast.success("Twitch account authorized for clip creation!");
@@ -340,14 +337,8 @@ export default function Dashboard() {
     if (selectedId === id) setSelectedId("all");
   };
 
-  const setLimit = async (id, val) => {
-    const clamped = Math.max(1, Math.min(100, val || 1));
-    setChannels((prev) => prev.map((c) => (c.id === id ? { ...c, clips_per_day: clamped } : c)));
-    await api.updateChannel(id, { clips_per_day: clamped });
-  };
-
   const syncChannel = async (id) => {
-    const res = await api.sync(id, 7);
+    const res = await api.sync(id, 1);
     await loadClips();
     return res;
   };
@@ -397,19 +388,6 @@ export default function Dashboard() {
     }
   };
 
-  const seedDemo = async () => {
-    setSeeding(true);
-    try {
-      await api.seedDemo();
-      toast.success("Demo channels loaded — explore away!");
-      const chs = await loadChannels();
-      await loadClips();
-      await refreshLive(chs);
-    } catch {
-      toast.error("Could not load demo");
-    }
-    setSeeding(false);
-  };
 
   const visibleChannels = selectedId === "all" ? channels : channels.filter((c) => c.id === selectedId);
 
@@ -495,29 +473,16 @@ export default function Dashboard() {
               </p>
               <div className="flex items-center justify-center gap-3">
                 <Button
-                  onClick={seedDemo}
-                  disabled={seeding}
-                  data-testid="load-demo-button"
+                  onClick={() => setSettingsOpen(true)}
                   className="h-11 px-6 bg-[#9146FF] hover:bg-[#772CE8] text-white font-semibold"
                 >
-                  <Rocket className="h-4 w-4 mr-2" /> {seeding ? "Loading…" : "Load demo channels"}
+                  Connect Twitch
                 </Button>
-                {!settings.twitch_configured && (
-                  <Button
-                    onClick={() => setSettingsOpen(true)}
-                    variant="outline"
-                    className="h-11 px-6 bg-transparent border-[#262636] text-white hover:bg-[#12121A]"
-                  >
-                    Connect Twitch
-                  </Button>
-                )}
               </div>
-              {!settings.twitch_configured && (
-                <p className="text-xs text-[#686880] mt-5 flex items-center justify-center gap-1.5">
-                  <Sparkles className="h-3 w-3 text-[#9146FF]" />
-                  Demo works instantly — connect Twitch for real live channels &amp; clips
-                </p>
-              )}
+              <p className="text-xs text-[#686880] mt-5 flex items-center justify-center gap-1.5">
+                <Sparkles className="h-3 w-3 text-[#9146FF]" />
+                Real Twitch channels only. Add a streamer and StreamClip will monitor them automatically.
+              </p>
             </div>
           ) : (
             visibleChannels.map((ch) => (
@@ -528,7 +493,6 @@ export default function Dashboard() {
                 hype={hypeMap[ch.id]}
                 clips={clipsFor(ch.id)}
                 onSync={syncChannel}
-                onLimit={setLimit}
                 onSampleHype={sampleHype}
                 onClipUpdated={onClipUpdated}
                 onClipDeleted={onClipDeleted}

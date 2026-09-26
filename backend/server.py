@@ -7,6 +7,7 @@ import shutil
 import asyncio
 import logging
 import tempfile
+import hashlib
 from pathlib import Path
 from urllib.parse import quote
 from datetime import datetime, timezone, timedelta
@@ -38,14 +39,6 @@ app = FastAPI()
 api = APIRouter(prefix="/api")
 
 HYPE_TAGS = ["Hype Spike", "Laughter", "Creepy Moment", "Insane Play", "Clutch", "Fail", "Wholesome"]
-DEMO_IMAGES = [
-    "https://images.unsplash.com/photo-1542751371-adc38448a05e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzd8MHwxfHNlYXJjaHwxfHxlc3BvcnRzJTIwc3RyZWFtZXIlMjBnYW1pbmclMjBzZXR1cCUyMGxpdmUlMjBzdHJlYW18ZW58MHx8fHwxNzg5ODU3NTc0fDA&ixlib=rb-4.1.0&q=85",
-    "https://images.unsplash.com/photo-1696710257827-75e2e5954059?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzd8MHwxfHNlYXJjaHw0fHxlc3BvcnRzJTIwc3RyZWFtZXIlMjBnYW1pbmclMjBzZXR1cCUyMGxpdmUlMjBzdHJlYW18ZW58MHx8fHwxNzg5ODU3NTc0fDA&ixlib=rb-4.1.0&q=85",
-    "https://images.unsplash.com/photo-1626218174358-7769486c4b79?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzd8MHwxfHNlYXJjaHwyfHxlc3BvcnRzJTIwc3RyZWFtZXIlMjBnYW1pbmclMjBzZXR1cCUyMGxpdmUlMjBzdHJlYW18ZW58MHx8fHwxNzg5ODU3NTc0fDA&ixlib=rb-4.1.0&q=85",
-    "https://images.pexels.com/photos/12832570/pexels-photo-12832570.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
-    "https://images.pexels.com/photos/7862594/pexels-photo-7862594.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
-]
-
 DEFAULT_OVERLAY = {
     "position": "bottom",
     "highlight": "#9146FF",
@@ -193,6 +186,48 @@ async def helix(path, params=None):
     return r.json()
 
 
+async def helix_user(login: str):
+    data = await helix("/users", {"login": login.lower()})
+    rows = data.get("data") or []
+    return rows[0] if rows else None
+
+
+async def helix_stream(user_id: str):
+    data = await helix("/streams", {"user_id": user_id, "first": 1})
+    rows = data.get("data") or []
+    return rows[0] if rows else None
+
+
+def parse_twitch_duration(value: str) -> int:
+    m = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", value or "")
+    if not m:
+        return 0
+    return int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3) or 0)
+
+
+def helix_video_to_vod(v: dict) -> dict:
+    return {
+        "id": v.get("id"),
+        "title": v.get("title") or "",
+        "length": parse_twitch_duration(v.get("duration", "")),
+        "created_at": v.get("created_at") or "",
+        "thumbnail": (v.get("thumbnail_url") or "").replace("%{width}", "480").replace("%{height}", "272"),
+        "game": "",
+        "url": v.get("url") or f"https://www.twitch.tv/videos/{v.get('id')}",
+    }
+
+
+async def helix_latest_vod(user_id: str):
+    data = await helix("/videos", {"user_id": user_id, "type": "archive", "first": 1})
+    rows = data.get("data") or []
+    return helix_video_to_vod(rows[0]) if rows else None
+
+
+async def helix_latest_vods(user_id: str, first: int = 10):
+    data = await helix("/videos", {"user_id": user_id, "type": "archive", "first": min(first, 100)})
+    return [helix_video_to_vod(v) for v in data.get("data") or []]
+
+
 # ---------------- Buffer auto-posting ----------------
 
 BUFFER_GQL_URL = "https://api.buffer.com"
@@ -288,7 +323,6 @@ async def buffer_sync_loop():
             api_key = settings.get("api_key") if settings else None
             if api_key:
                 channels = await db.channels.find({
-                    "is_demo": {"$ne": True},
                     "buffer_channels": {"$exists": True, "$ne": []},
                 }).to_list(200)
                 for ch in channels:
@@ -339,6 +373,39 @@ AI_SYSTEM = (
 )
 
 
+TITLE_PATTERNS = [
+    "{who} JUST BROKE THE CHAT",
+    "CHAT DID NOT EXPECT THIS",
+    "THAT PLAY WAS ACTUALLY INSANE",
+    "THE WHOLE CHAT LOST IT",
+    "THIS MOMENT GOT WILD FAST",
+    "NOBODY SAW THAT COMING",
+    "THAT REACTION WAS PERFECT",
+    "THIS WAS PURE CHAOS",
+    "THE CLUTCH OF THE STREAM",
+    "THAT WAS WAY TOO CLEAN",
+    "BRO REALLY PULLED THAT OFF",
+    "THE STREAM JUST ERUPTED",
+    "THAT MOMENT WAS UNREAL",
+    "EVERYONE IN CHAT FREAKED OUT",
+    "THIS TURNED INTO A MOVIE",
+    "THE TIMING WAS PERFECT",
+    "THAT WAS ABSOLUTELY NUTS",
+    "THE CHAT COULD NOT HANDLE THIS",
+    "ONE OF THE CRAZIEST MOMENTS",
+    "THAT PLAY CHANGED EVERYTHING",
+    "THE REACTION MAKES THIS 10X BETTER",
+    "THIS ESCALATED SO FAST",
+    "THE PERFECT LAST-SECOND PLAY",
+    "THAT WAS A MASSIVE THROW",
+    "THE MOST RANDOM MOMENT EVER",
+    "CHAT KNEW SOMETHING WAS COMING",
+    "THAT MOMENT DESERVED A CLIP",
+    "THIS IS WHY WE WATCH LIVE",
+    "THE STREAM PEAKED RIGHT HERE",
+    "ABSOLUTE CHAOS IN THE CHAT",
+]
+
 def _fallback_ai(clip):
     t = clip.get("title") or "Insane Twitch Moment"
     game = clip.get("game_name") or "Live"
@@ -348,6 +415,19 @@ def _fallback_ai(clip):
         "ai_hashtags": [f"#{who}", "#twitch", "#twitchclips", f"#{re.sub(r'[^a-z0-9]','',game.lower()) or 'gaming'}", "#fyp", "#viral"],
         "ai_caption": (t[:40]).upper(),
     }
+
+
+async def make_unique_clip_title(clip: dict) -> str:
+    """Create a unique title without consuming an LLM credit."""
+    who = (clip.get("channel_login") or "streamer").replace("_", " ").strip().title()
+    hype = clip.get("hype_type") or "Hype Spike"
+    source = str(clip.get("twitch_clip_id") or clip.get("id") or uuid.uuid4().hex)
+    digest = hashlib.sha1(source.encode()).hexdigest()[:6].upper()
+    base = TITLE_PATTERNS[int(digest, 16) % len(TITLE_PATTERNS)].format(who=who)
+    candidate = f"{base} • {hype} #{digest}"[:90]
+    if not await db.clips.find_one({"ai_title": candidate}):
+        return candidate
+    return f"{base} • {hype} #{uuid.uuid4().hex[:8].upper()}"[:90]
 
 
 async def generate_ai_content(clip: dict) -> dict:
@@ -605,37 +685,43 @@ def _moment_duration(density: float) -> int:
 
 
 async def find_hype_moments_in_vod(vod_id: str, vod_length: int, num_moments: int):
-    """Sample the chat replay across the VOD and return the densest (most hyped) moments."""
-    start = 120
-    end = max(start + 60, vod_length - 120)
+    """Find non-overlapping chat spikes. Only strong relative spikes are returned."""
+    start = 60
+    end = max(start + 60, vod_length - 60)
     if end <= start:
         start, end = 0, max(60, vod_length)
-    n_samples = min(70, max(num_moments * 3, 30))
-    step = max(20, (end - start) // n_samples)
+
+    # A 20-second grid gives enough resolution without creating hundreds of
+    # requests for a long VOD. This is not a clip-count limit.
+    step = 20
     offsets = list(range(start, end, step))
-    sem = asyncio.Semaphore(6)
+    sem = asyncio.Semaphore(8)
 
-    async def sample(o):
+    async def sample(offset):
         async with sem:
-            return (o, await vod_chat_density(vod_id, o))
+            return offset, await vod_chat_density(vod_id, offset)
 
-    results = await asyncio.gather(*[sample(o) for o in offsets])
-    hot = sorted([r for r in results if r[1] > 0], key=lambda x: x[1], reverse=True)
+    results = await asyncio.gather(*(sample(o) for o in offsets), return_exceptions=True)
+    valid = [r for r in results if isinstance(r, tuple) and r[1] > 0]
+    if not valid:
+        return []
+
+    values = sorted(r[1] for r in valid)
+    median = values[len(values) // 2]
+    threshold = max(0.15, median * 1.35)
+    hot = sorted([r for r in valid if r[1] >= threshold], key=lambda x: x[1], reverse=True)
 
     picked = []
-    for o, d in hot:
-        dur = _moment_duration(d)
-        if all(abs(o - p["peak"]) >= p["duration"] * 1.4 for p in picked):
-            picked.append({"peak": o, "offset": max(0, int(o - dur * 0.35)), "duration": dur, "density": round(d, 2)})
-        if len(picked) >= num_moments:
-            break
-    # sparse-chat fallback: spread evenly so the user still gets clips
-    if len(picked) < num_moments:
-        for o in offsets:
-            if all(abs(o - p["peak"]) >= 30 for p in picked):
-                picked.append({"peak": o, "offset": max(0, o - 8), "duration": 25, "density": 0.0})
-            if len(picked) >= num_moments:
-                break
+    for offset, density in hot:
+        duration = _moment_duration(density)
+        if all(abs(offset - p["peak"]) >= max(25, p["duration"] * 1.25) for p in picked):
+            picked.append({
+                "peak": offset,
+                "offset": max(0, int(offset - duration * 0.35)),
+                "duration": duration,
+                "density": round(density, 2),
+            })
+
     return picked[:num_moments]
 
 
@@ -656,122 +742,180 @@ async def _make_poster(video_path: str, out: str):
         return False
 
 
-async def _store_vod_clips(ch: dict, vods: list, need: int):
-    if need <= 0:
-        need = ch.get("clips_per_day", 20)
+async def _store_vod_clips(ch: dict, vods: list, need: int = 0):
+    """Create clips from the single most recent completed VOD.
+
+    There is no daily clip quota. The number of moments is determined by the
+    amount of non-overlapping chat activity found in the latest VOD. AI is not
+    called while discovering clips, which keeps discovery cheap and reliable.
+    """
+    if not vods:
+        return []
+
+    # Twitch returns newest broadcasts first. Only use the latest completed VOD
+    # for the Get Clips button, exactly as the UI promises.
+    vod = max(vods, key=lambda v: v.get("created_at", ""))
+    length = int(vod.get("length", 0) or 0)
+    if length < 30:
+        return []
+
+    # One scan point roughly every 30 seconds. This is a discovery resolution,
+    # not a clip-count limit. Longer broadcasts therefore naturally produce more
+    # candidate moments.
+    scan_count = max(30, min(360, length // 20))
+    moments = await find_hype_moments_in_vod(vod["id"], length, scan_count)
+
     out = []
-    ai_sem = asyncio.Semaphore(4)
-    usable = [v for v in vods if v["length"] > 180][:3] or vods[:3]
-    per_vod = max(1, math.ceil(need / max(1, len(usable))))
-    remaining = need
+    for m in moments:
+        off = int(m["offset"])
+        dup = await db.clips.find_one({
+            "channel_id": ch["id"],
+            "vod_id": vod["id"],
+            "start_seconds": {"$gte": off - 12, "$lte": off + 12},
+        })
+        if dup:
+            continue
 
-    for vod in usable:
-        if remaining <= 0:
-            break
-        want = min(per_vod, remaining)
-        moments = await find_hype_moments_in_vod(vod["id"], vod["length"], want)
-
-        async def make(m):
-            off = m["offset"]
-            dup = await db.clips.find_one({
-                "channel_id": ch["id"], "vod_id": vod["id"],
-                "start_seconds": {"$gte": off - 15, "$lte": off + 15}})
-            if dup:
-                return
-            cid = str(uuid.uuid4())
-            clip = {
-                "id": cid,
-                "channel_id": ch["id"],
-                "channel_login": ch["login"],
-                "source_type": "vod",
-                "vod_id": vod["id"],
-                "start_seconds": off,
-                "duration": m["duration"],
-                "twitch_clip_id": f"vod-{vod['id']}-{off}",
-                "title": vod["title"],
-                "url": f"https://www.twitch.tv/videos/{vod['id']}?t={off}s",
-                "embed_url": "",
-                "thumbnail_url": vod["thumbnail"],
-                "poster_file": None,
-                "view_count": 0,
-                "hype_density": m["density"],
-                "creator_name": "",
-                "game_name": vod["game"],
-                "created_at_twitch": vod["created_at"],
-                "hype_type": hype_for(cid),
-                "caption_overlay": dict(ch.get("caption_overlay", DEFAULT_OVERLAY)),
-                "is_demo": False,
+        cid = str(uuid.uuid4())
+        clip = {
+            "id": cid,
+            "channel_id": ch["id"],
+            "channel_login": ch["login"],
+            "source_type": "vod",
+            "vod_id": vod["id"],
+            "start_seconds": off,
+            "duration": m["duration"],
+            "twitch_clip_id": f"vod-{vod['id']}-{off}",
+            "title": vod.get("title", ""),
+            "url": f"https://www.twitch.tv/videos/{vod['id']}?t={off}s",
+            "embed_url": "",
+            "thumbnail_url": vod.get("thumbnail", ""),
+            "poster_file": None,
+            "view_count": 0,
+            "hype_density": m["density"],
+            "creator_name": "",
+            "game_name": vod.get("game", ""),
+            "created_at_twitch": vod.get("created_at", ""),
+            "hype_type": hype_for(cid),
+            "caption_overlay": dict(ch.get("caption_overlay", DEFAULT_OVERLAY)),
                 "rendered": False,
-                "render_status": "pending",
-                "render_file": None,
-                "created_at": now_iso(),
-            }
-            async with ai_sem:
-                ai = await generate_ai_content(clip)
-            clip.update(ai)
-            clip["generated"] = True
-            await db.clips.insert_one(dict(clip))
-            out.append(clean(dict(clip)))
+            "render_status": "pending",
+            "render_file": None,
+            "created_at": now_iso(),
+            **_fallback_ai({
+                "title": vod.get("title", ""),
+                "game_name": vod.get("game", ""),
+                "channel_login": ch["login"],
+            }),
+            "generated": False,
+        }
+        clip["ai_title"] = await make_unique_clip_title(clip)
+        clip["ai_caption"] = clip["ai_title"][:40].upper()
+        await db.clips.insert_one(dict(clip))
+        out.append(clean(dict(clip)))
 
-        await asyncio.gather(*[make(m) for m in moments])
-        remaining = need - len(out)
     return out
 
 
-async def capture_live_moment(ch: dict, hype: dict, user: dict):
-    """Record the live stream right now (chat is hyped) and cut a vertical clip from it."""
-    workdir = tempfile.mkdtemp(prefix="live_")
-    cid = str(uuid.uuid4())
+async def create_live_twitch_clip(ch: dict, hype: dict, user: dict):
+    """Create a real Twitch clip at a live hype spike.
+
+    Requires the Twitch account connected in Settings to have clips:edit.
+    Twitch captures the live broadcast itself, so this does not depend on a
+    fragile local HLS buffer.
+    """
+    oauth = await db.settings.find_one({"_id": "oauth"})
+    access_token = (oauth or {}).get("access_token")
+    if not access_token:
+        logger.warning("live auto-clipping skipped: Twitch OAuth is not connected")
+        return None
+
+    cid, _ = await get_creds()
+    if not cid or not ch.get("twitch_user_id"):
+        return None
+
     try:
-        dur = int(max(20, min(60, 20 + (hype.get("hype_level", 0) / 100) * 40)))
-        stream = user.get("stream") or {}
+        temp_clip = {
+            "id": str(uuid.uuid4()),
+            "twitch_clip_id": f"live-{ch['id']}-{int(asyncio.get_event_loop().time())}",
+            "channel_login": ch["login"],
+            "hype_type": hype_for(ch["id"]),
+            "start_seconds": 0,
+        }
+        unique_title = await make_unique_clip_title(temp_clip)
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(
+                "https://api.twitch.tv/helix/clips",
+                params={
+                    "broadcaster_id": ch["twitch_user_id"],
+                    "has_delay": "false",
+                    "duration": "30",
+                    "title": unique_title,
+                },
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Client-Id": cid,
+                },
+            )
+        if r.status_code not in (200, 202):
+            logger.warning("Twitch create clip failed: %s %s", r.status_code, r.text[:300])
+            return None
+
+        item = (r.json().get("data") or [None])[0]
+        if not item:
+            return None
+
+        clip_id = item.get("id")
+        edit_url = item.get("edit_url", "")
+        if not clip_id:
+            return None
+
+        # Give Twitch a moment to publish the clip, then resolve its public URL.
+        await asyncio.sleep(2)
+        raw = await gql_list_clips(ch["login"], "LAST_DAY", 100)
+        _, recent = raw
+        found = next((x for x in recent if x.get("id") == clip_id), None)
+
         clip = {
-            "id": cid,
+            "id": str(uuid.uuid4()),
             "channel_id": ch["id"],
             "channel_login": ch["login"],
             "source_type": "live",
             "vod_id": None,
             "start_seconds": 0,
-            "duration": dur,
-            "twitch_clip_id": f"live-{cid}",
-            "title": ((user.get("lastBroadcast") or {}).get("title") or ""),
-            "url": f"https://www.twitch.tv/{ch['login']}",
-            "embed_url": "",
-            "thumbnail_url": f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{ch['login']}-480x272.jpg",
+            "duration": 30,
+            "twitch_clip_id": clip_id,
+            "title": user.get("title", ""),
+            "url": (found or {}).get("url") or f"https://clips.twitch.tv/{clip_id}",
+            "embed_url": (found or {}).get("embed_url", ""),
+            "thumbnail_url": (found or {}).get("thumbnail_url", ""),
             "poster_file": None,
-            "view_count": stream.get("viewersCount", 0),
+            "view_count": (found or {}).get("view_count", 0),
             "hype_density": round(hype.get("messages_per_minute", 0) / 60, 2),
             "creator_name": "",
-            "game_name": (stream.get("game") or {}).get("name", ""),
+            "game_name": user.get("game_name", ""),
             "created_at_twitch": now_iso(),
-            "hype_type": hype_for(cid),
+            "hype_type": hype_for(clip_id),
             "caption_overlay": dict(ch.get("caption_overlay", DEFAULT_OVERLAY)),
-            "is_demo": False,
-            "rendered": False,
-            "render_status": "rendering",
+                "rendered": False,
+            "render_status": "pending",
             "render_file": None,
             "created_at": now_iso(),
+            **_fallback_ai({
+                "title": user.get("title", "Live Twitch Moment"),
+                "game_name": user.get("game_name", ""),
+                "channel_login": ch["login"],
+            }),
+            "generated": False,
+            "twitch_edit_url": edit_url,
         }
-        clip.update(await generate_ai_content(clip))
-        clip["generated"] = True
+        clip["ai_title"] = unique_title
+        clip["ai_caption"] = clip["ai_title"][:40].upper()
         await db.clips.insert_one(dict(clip))
-        async with RENDER_SEM:
-            pl = await live_playlist_url(ch["login"])
-            if not pl:
-                raise RuntimeError("no live source")
-            out = os.path.join(RENDER_DIR, f"clip_{cid}.mp4")
-            await render_vertical(pl, out, clip["ai_caption"], clip["caption_overlay"], workdir, duration=dur)
-        poster = os.path.join(RENDER_DIR, f"clip_{cid}.jpg")
-        has_poster = await _make_poster(out, poster)
-        await db.clips.update_one({"id": cid}, {"$set": {
-            "rendered": True, "render_status": "done", "render_file": out,
-            "poster_file": poster if has_poster else None}})
-        logger.info(f"captured live moment for {ch['login']} ({dur}s)")
+        return clean(dict(clip))
     except Exception as e:
-        logger.warning(f"capture_live_moment {ch.get('login')}: {e}")
-        await db.clips.delete_one({"id": cid})
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        logger.exception("create_live_twitch_clip failed for %s: %s", ch.get("login"), e)
+        return None
 
 
 # ---------------- Routes ----------------
@@ -893,27 +1037,23 @@ async def add_channel(body: ChannelCreate):
     if existing:
         raise HTTPException(400, f"{login} is already added.")
 
-    user = await gql_channel_info(login)
+    user = await helix_user(login)
     if not user:
         raise HTTPException(404, f"No Twitch channel found for '{login}'.")
 
     doc = {
         "id": str(uuid.uuid4()),
         "login": login,
-        "display_name": user.get("displayName") or login,
+        "display_name": user.get("display_name") or login,
         "twitch_user_id": user.get("id"),
-        "avatar_url": user.get("profileImageURL") or "",
+        "avatar_url": user.get("profile_image_url") or "",
         "description": user.get("description") or "",
-        "clips_per_day": 20,
         "auto_clip": True,
         "caption_overlay": dict(DEFAULT_OVERLAY),
-        "is_demo": False,
         "created_at": now_iso(),
     }
     await db.channels.insert_one(dict(doc))
     await snapshot_channels()
-    # Do it for them: auto-fetch + auto-render this channel's best clips in the background
-    asyncio.create_task(auto_pull_channel(doc, "LAST_MONTH"))
     return clean(doc)
 
 
@@ -942,16 +1082,16 @@ async def channel_live(channel_id: str):
     ch = await db.channels.find_one({"id": channel_id})
     if not ch:
         raise HTTPException(404, "Channel not found")
-    if ch.get("is_demo"):
-        return {"is_live": True, "viewer_count": 42137, "title": "DEMO: cranking clips live!",
-                "game_name": "Just Chatting", "started_at": now_iso()}
-    user = await gql_channel_info(ch["login"])
-    stream = (user or {}).get("stream")
+    stream = await helix_stream(ch["twitch_user_id"])
     if not stream:
         return {"is_live": False, "viewer_count": 0, "title": "", "game_name": ""}
-    return {"is_live": True, "viewer_count": stream.get("viewersCount", 0),
-            "title": ((user or {}).get("lastBroadcast") or {}).get("title", ""),
-            "game_name": (stream.get("game") or {}).get("name", ""), "started_at": ""}
+    return {
+        "is_live": True,
+        "viewer_count": stream.get("viewer_count", 0),
+        "title": stream.get("title", ""),
+        "game_name": stream.get("game_name", ""),
+        "started_at": stream.get("started_at", ""),
+    }
 
 
 @api.get("/channels/{channel_id}/hype")
@@ -990,8 +1130,7 @@ async def _store_clips(ch, raw_clips, limit, generate_ai=True):
             "created_at_twitch": rc.get("created_at", ""),
             "hype_type": hype_for(rc["id"]),
             "caption_overlay": dict(ch.get("caption_overlay", DEFAULT_OVERLAY)),
-            "is_demo": False,
-            "rendered": False,
+                "rendered": False,
             "render_status": "pending",
             "render_file": None,
             "created_at": now_iso(),
@@ -1012,40 +1151,28 @@ async def _store_clips(ch, raw_clips, limit, generate_ai=True):
 
 
 async def auto_pull_channel(ch: dict, period: str = None):
-    """Record the channel's best moments from its past broadcasts (credential-free).
-    Rendering to 9:16 happens in the background so Save is instant."""
+    """Analyze the newest completed Twitch livestream for this channel."""
     try:
-        limit = ch.get("clips_per_day", 20)
-        existing = await db.clips.count_documents({"channel_id": ch["id"]})
-        if existing >= limit:
+        vod = await helix_latest_vod(ch["twitch_user_id"])
+        if not vod:
             return []
-        user, vods = await gql_list_vods(ch["login"], 5)
-        if not vods:
-            logger.info(f"{ch.get('login')}: no past broadcasts available to clip")
-            return []
-        return await _store_vod_clips(ch, vods, limit - existing)
+        return await _store_vod_clips(ch, [vod], 0)
     except Exception as e:
-        logger.warning(f"auto_pull_channel {ch.get('login')}: {e}")
+        logger.warning("auto_pull_channel %s: %s", ch.get("login"), e)
         return []
 
 
 @api.post("/channels/{channel_id}/sync")
 async def sync_clips(channel_id: str, body: SyncRequest):
+    """Get every distinct hype moment we can identify in the latest completed livestream."""
     ch = await db.channels.find_one({"id": channel_id})
     if not ch:
         raise HTTPException(404, "Channel not found")
-    if ch.get("is_demo"):
-        raise HTTPException(400, "This is a demo channel with sample clips already loaded.")
-    user, vods = await gql_list_vods(ch["login"], 5)
-    if user is None:
-        raise HTTPException(502, "Couldn't reach Twitch right now. Try again in a moment.")
-    if not vods:
-        raise HTTPException(404, f"{ch.get('display_name') or ch['login']} has no past broadcasts available to clip from. Twitch only keeps VODs for a limited time.")
-    limit = ch.get("clips_per_day", 20)
-    existing = await db.clips.count_documents({"channel_id": channel_id})
-    need = max(limit - existing, limit)
-    stored = await _store_vod_clips(ch, vods, need)
-    return {"fetched": len(vods), "stored": len(stored), "clips": stored}
+    vod = await helix_latest_vod(ch["twitch_user_id"])
+    if not vod:
+        raise HTTPException(404, f"{ch.get('display_name') or ch['login']} has no completed livestream available to clip.")
+    stored = await _store_vod_clips(ch, [vod], 0)
+    return {"fetched": 1, "stored": len(stored), "clips": stored, "vod_id": vod["id"]}
 
 
 @api.get("/channels/{channel_id}/vods")
@@ -1053,26 +1180,19 @@ async def list_vods(channel_id: str):
     ch = await db.channels.find_one({"id": channel_id})
     if not ch:
         raise HTTPException(404, "Channel not found")
-    _, vods = await gql_list_vods(ch["login"], 8)
-    return vods
+    return await helix_latest_vods(ch["twitch_user_id"], 8)
 
 
 @api.post("/channels/{channel_id}/pull-vod")
 async def pull_vod(channel_id: str, days: int = Query(30)):
-    """Record the best hype moments from a channel's past broadcasts (credential-free)."""
     ch = await db.channels.find_one({"id": channel_id})
     if not ch:
         raise HTTPException(404, "Channel not found")
-    if ch.get("is_demo"):
-        raise HTTPException(400, "This is a demo channel with sample clips already loaded.")
-    user, vods = await gql_list_vods(ch["login"], 8)
-    if user is None:
-        raise HTTPException(502, "Couldn't reach Twitch right now. Try again in a moment.")
-    if not vods:
-        raise HTTPException(404, f"{ch.get('display_name') or ch['login']} has no past broadcasts available to clip from.")
-    limit = ch.get("clips_per_day", 20)
-    stored = await _store_vod_clips(ch, vods, limit)
-    return {"fetched": len(vods), "stored": len(stored), "clips": stored}
+    vod = await helix_latest_vod(ch["twitch_user_id"])
+    if not vod:
+        raise HTTPException(404, f"{ch.get('display_name') or ch['login']} has no completed livestream available to clip from.")
+    stored = await _store_vod_clips(ch, [vod], 0)
+    return {"fetched": 1, "stored": len(stored), "clips": stored}
 
 
 @api.get("/clips")
@@ -1156,7 +1276,7 @@ GQL_CLIP_HASH = "36b89d2507fce29e5ca551df756d27c1cfe079e2609642b4390aa4c35796eb1
 
 async def resolve_clip_source(slug: str) -> str | None:
     """Resolve a Twitch clip's highest-quality downloadable MP4 URL via the public GQL API."""
-    if not slug or slug.startswith("demo"):
+    if not slug:
         return None
     body = [{
         "operationName": "VideoAccessToken_Clip",
@@ -1262,7 +1382,7 @@ RENDER_SEM = asyncio.Semaphore(3)
 async def render_clip_to_store(clip_id: str):
     """Render a clip to a stored 9:16 file so it's ready to save instantly."""
     clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
-    if not clip or clip.get("is_demo"):
+    if not clip:
         return
     if clip.get("render_file") and os.path.exists(clip["render_file"]):
         await db.clips.update_one({"id": clip_id}, {"$set": {"rendered": True, "render_status": "done"}})
@@ -1306,14 +1426,17 @@ async def prepare_clip(clip_id: str):
     clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
     if not clip:
         raise HTTPException(404, "Clip not found")
-    if clip.get("is_demo"):
-        raise HTTPException(400, "This is a sample clip.")
     status = clip.get("render_status")
     if status == "done" and clip.get("render_file") and os.path.exists(clip["render_file"]):
         return {"render_status": "done"}
-    if status != "rendering":
-        await db.clips.update_one({"id": clip_id}, {"$set": {"render_status": "pending"}})
-        asyncio.create_task(render_clip_to_store(clip_id))
+
+    # A process restart can leave a clip stuck in rendering. Treat stale/error
+    # states as retryable instead of leaving the UI on Preparing forever.
+    await db.clips.update_one(
+        {"id": clip_id},
+        {"$set": {"render_status": "pending", "rendered": False}}
+    )
+    asyncio.create_task(render_clip_to_store(clip_id))
     return {"render_status": "rendering"}
 
 
@@ -1323,8 +1446,6 @@ async def get_clip_video(clip_id: str):
     clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
     if not clip:
         raise HTTPException(404, "Clip not found")
-    if clip.get("is_demo"):
-        raise HTTPException(400, "This is a sample clip. Add your own channel to get real, saveable videos.")
     if not (clip.get("render_file") and os.path.exists(clip["render_file"])):
         await render_clip_to_store(clip_id)
         clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
@@ -1338,7 +1459,7 @@ async def get_clip_video(clip_id: str):
         content=data,
         media_type="video/mp4",
         headers={
-            "Content-Disposition": f'attachment; filename="{name}_9x16.mp4"',
+            "Content-Disposition": f'inline; filename="{name}_9x16.mp4"',
             "Content-Length": str(len(data)),
             "Cache-Control": "no-store",
             "Accept-Ranges": "none",
@@ -1399,8 +1520,6 @@ async def create_download_job(clip_id: str):
     clip = await db.clips.find_one({"id": clip_id}, {"_id": 0})
     if not clip:
         raise HTTPException(404, "Clip not found")
-    if clip.get("is_demo"):
-        raise HTTPException(400, "This is a sample clip. Add your own channel and hit 'Get clips' to pull real, downloadable videos.")
     await _prune_old_renders()
     job_id = uuid.uuid4().hex
     await db.render_jobs.insert_one({
@@ -1449,7 +1568,7 @@ async def oauth_start():
     state = uuid.uuid4().hex
     await db.settings.update_one({"_id": "oauth_state"}, {"$set": {"state": state}}, upsert=True)
     q = urlencode({"response_type": "code", "client_id": cid, "redirect_uri": REDIRECT_URI,
-                   "scope": "clips:edit", "state": state})
+                   "scope": "clips:edit channel:manage:clips", "state": state})
     return RedirectResponse("https://id.twitch.tv/oauth2/authorize?" + q)
 
 
@@ -1493,170 +1612,107 @@ async def clip_now(channel_id: str):
     return {"ok": True, "pending": r.json().get("data", [])}
 
 
-# -------- Demo --------
-
-DEMO_CHANNELS = [
-    {"login": "xqc", "display_name": "xQc", "game": "Grand Theft Auto V"},
-    {"login": "kaicenat", "display_name": "KaiCenat", "game": "Just Chatting"},
-    {"login": "pokimane", "display_name": "Pokimane", "game": "Valorant"},
-]
-
-DEMO_CLIP_TITLES = [
-    "He did NOT expect that to happen", "1 HP clutch of the century", "Chat went absolutely feral",
-    "This jumpscare took 5 years off my life", "The funniest fail you'll see today",
-    "Insane 200 IQ outplay", "Wholesome moment with the community", "This bit had everyone crying laughing",
-]
-
-
-@api.post("/demo/seed")
-async def seed_demo():
-    await db.channels.delete_many({"is_demo": True})
-    await db.clips.delete_many({"is_demo": True})
-    created = []
-    for i, dc in enumerate(DEMO_CHANNELS):
-        ch = {
-            "id": str(uuid.uuid4()),
-            "login": dc["login"],
-            "display_name": dc["display_name"],
-            "twitch_user_id": None,
-            "avatar_url": DEMO_IMAGES[i % len(DEMO_IMAGES)],
-            "description": "Demo channel with sample clips.",
-            "clips_per_day": 20,
-            "auto_clip": True,
-            "caption_overlay": dict(DEFAULT_OVERLAY),
-            "is_demo": True,
-            "created_at": now_iso(),
-        }
-        await db.channels.insert_one(dict(ch))
-        created.append(clean(dict(ch)))
-        for j in range(6):
-            title = DEMO_CLIP_TITLES[(i * 6 + j) % len(DEMO_CLIP_TITLES)]
-            cid_local = str(uuid.uuid4())
-            hype = HYPE_TAGS[(i * 6 + j) % len(HYPE_TAGS)]
-            clip = {
-                "id": cid_local,
-                "channel_id": ch["id"],
-                "channel_login": dc["login"],
-                "twitch_clip_id": f"demo-{cid_local}",
-                "title": title,
-                "url": f"https://twitch.tv/{dc['login']}",
-                "embed_url": "",
-                "thumbnail_url": DEMO_IMAGES[(i + j) % len(DEMO_IMAGES)],
-                "duration": 30 + (j * 4),
-                "view_count": 250000 - (j * 21000) - (i * 5000),
-                "creator_name": "ClipBot",
-                "game_name": dc["game"],
-                "created_at_twitch": now_iso(),
-                "hype_type": hype,
-                "caption_overlay": dict(DEFAULT_OVERLAY),
-                "is_demo": True,
-                "generated": True,
-                "ai_title": f"{title} 😱🔥",
-                "ai_hashtags": [f"#{dc['login']}", "#twitch", "#twitchclips",
-                                f"#{re.sub(r'[^a-z0-9]','', dc['game'].lower())}", "#fyp", "#viral", "#gaming"],
-                "ai_caption": title.upper()[:38],
-                "created_at": now_iso(),
-            }
-            await db.clips.insert_one(dict(clip))
-    await snapshot_channels()
-    return {"ok": True, "channels": created}
-
-
-# -------- Background auto-sync --------
+# -------- Background monitoring --------
 
 async def auto_sync_loop():
-    await asyncio.sleep(30)
+    await asyncio.sleep(20)
     while True:
         try:
-            chans = await db.channels.find({"auto_clip": True, "is_demo": {"$ne": True}}).to_list(200)
+            chans = await db.channels.find({"auto_clip": True}).to_list(500)
             for ch in chans:
-                try:
-                    await auto_pull_channel(ch, "LAST_WEEK")
-                except Exception as e:
-                    logger.warning(f"auto-sync {ch.get('login')}: {e}")
+                await auto_pull_channel(ch)
         except Exception as e:
-            logger.warning(f"auto_sync_loop: {e}")
-        await asyncio.sleep(900)  # every 15 minutes
+            logger.warning("auto_sync_loop: %s", e)
+        await asyncio.sleep(int(os.environ.get("AUTO_VOD_CHECK_SECONDS", "300")))
 
 
 async def render_worker():
-    """Continuously pre-render pending clips to 9:16 in the background so every card is
-    already 'Save video' by the time the user looks. Renders up to RENDER_SEM concurrently,
-    each at `nice -n 19` with a single ffmpeg thread, so the web server stays responsive."""
     await asyncio.sleep(15)
     while True:
         try:
-            clip = await db.clips.find_one(
-                {"is_demo": {"$ne": True}, "render_status": "pending"}, {"_id": 0})
+            clip = await db.clips.find_one({"render_status": "pending"}, {"_id": 0})
             if clip:
                 asyncio.create_task(render_clip_to_store(clip["id"]))
                 await asyncio.sleep(1)
             else:
                 await asyncio.sleep(8)
         except Exception as e:
-            logger.warning(f"render_worker: {e}")
+            logger.warning("render_worker: %s", e)
             await asyncio.sleep(8)
-
-
-async def live_monitor_loop():
-    """Watch each channel; when it's live AND chat blows up, record that hype moment live."""
-    await asyncio.sleep(45)
-    while True:
-        try:
-            if os.getloadavg()[0] < 1.6:
-                chans = await db.channels.find(
-                    {"auto_clip": True, "is_demo": {"$ne": True}}).to_list(200)
-                for ch in chans:
-                    try:
-                        user = await gql_channel_info(ch["login"])
-                        if not (user or {}).get("stream"):
-                            continue
-                        hype = await sample_hype(ch["login"], 8)
-                        if hype.get("hype_level", 0) >= 55:
-                            last = LIVE_CAPTURE.get(ch["id"], 0)
-                            if asyncio.get_event_loop().time() - last > 150:
-                                LIVE_CAPTURE[ch["id"]] = asyncio.get_event_loop().time()
-                                asyncio.create_task(capture_live_moment(ch, hype, user))
-                    except Exception as e:
-                        logger.warning(f"live_monitor {ch.get('login')}: {e}")
-        except Exception as e:
-            logger.warning(f"live_monitor_loop: {e}")
-        await asyncio.sleep(50)
 
 
 LIVE_CAPTURE = {}
 
 
+async def live_monitor_loop():
+    """Keep watching configured channels and create real Twitch clips at strong chat spikes."""
+    await asyncio.sleep(10)
+    while True:
+        try:
+            chans = await db.channels.find({"auto_clip": True}).to_list(500)
+            for ch in chans:
+                try:
+                    stream = await helix_stream(ch["twitch_user_id"])
+                    if not stream:
+                        continue
+                    hype = await sample_hype(ch["login"], int(os.environ.get("LIVE_CHAT_SAMPLE_SECONDS", "8")))
+                    if hype.get("hype_level", 0) < int(os.environ.get("LIVE_HYPE_THRESHOLD", "45")):
+                        continue
+                    now = asyncio.get_event_loop().time()
+                    last = LIVE_CAPTURE.get(ch["id"], 0)
+                    if now - last < int(os.environ.get("LIVE_CLIP_COOLDOWN", "75")):
+                        continue
+                    LIVE_CAPTURE[ch["id"]] = now
+                    await create_live_twitch_clip(ch, hype, stream)
+                except Exception as e:
+                    logger.warning("live_monitor %s: %s", ch.get("login"), e)
+        except Exception as e:
+            logger.warning("live_monitor_loop: %s", e)
+        await asyncio.sleep(int(os.environ.get("LIVE_CHECK_SECONDS", "20")))
+
+
 @app.on_event("startup")
 async def on_startup():
     await restore_from_disk()
-    await db.channels.create_index("login")
-    await db.clips.create_index("twitch_clip_id")
-    # one-time migration to the self-recording engine: drop old borrowed Twitch clips + re-pull
-    mig = await db.settings.find_one({"_id": "engine_v2"})
-    if not mig:
-        real = await db.clips.find({"is_demo": {"$ne": True}},
-                                   {"render_file": 1, "poster_file": 1, "_id": 0}).to_list(5000)
-        for d in real:
-            _remove_clip_files(d)
-        await db.clips.delete_many({"is_demo": {"$ne": True}})
-        await db.settings.update_one({"_id": "engine_v2"}, {"$set": {"done": True, "at": now_iso()}}, upsert=True)
-        logger.info(f"engine_v2 migration: removed {len(real)} legacy clips, re-recording from VODs")
-        chans = await db.channels.find({"is_demo": {"$ne": True}}).to_list(200)
-        for ch in chans:
-            asyncio.create_task(auto_pull_channel(ch))
-    # reconcile render state after a restart: unstick 'rendering' and re-queue clips whose file is gone
-    await db.clips.update_many({"render_status": "rendering"}, {"$set": {"render_status": "pending"}})
-    done = await db.clips.find({"is_demo": {"$ne": True}, "render_status": "done"},
-                               {"id": 1, "render_file": 1}).to_list(3000)
-    for c in done:
-        if not c.get("render_file") or not os.path.exists(c["render_file"]):
-            await db.clips.update_one({"id": c["id"]},
-                                      {"$set": {"render_status": "pending", "rendered": False, "render_file": None}})
-    asyncio.create_task(auto_sync_loop())
-    asyncio.create_task(render_worker())
-    asyncio.create_task(live_monitor_loop())
-    asyncio.create_task(buffer_sync_loop())
+    try:
+        # Real mode only. Delete legacy demo data and never seed it.
+        await db.channels.delete_many({"is_demo": True})
+        await db.clips.delete_many({"is_demo": True})
+        await db.channels.update_many({}, {"$unset": {"is_demo": ""}})
+        await db.clips.update_many({}, {"$unset": {"is_demo": ""}})
+        # Make the unique login index idempotent: drop any stale index, then remove
+        # duplicate login docs (keep the oldest per login) BEFORE creating the unique index.
+        try:
+            existing = await db.channels.index_information()
+            if "login_1" in existing:
+                await db.channels.drop_index("login_1")
+        except Exception as e:
+            logger.warning(f"drop login_1 index skipped: {e}")
+        seen = set()
+        async for ch in db.channels.find({}, {"login": 1, "created_at": 1}).sort("created_at", 1):
+            lg = ch.get("login")
+            if lg in seen:
+                await db.channels.delete_one({"_id": ch["_id"]})
+            else:
+                seen.add(lg)
+        await db.channels.create_index("login", unique=True)
+        await db.clips.create_index("twitch_clip_id")
+        await db.clips.create_index([("channel_id", 1), ("vod_id", 1), ("start_seconds", 1)])
+        await db.clips.update_many({"render_status": "rendering"}, {"$set": {"render_status": "pending"}})
+        done = await db.clips.find({"render_status": "done"}, {"id": 1, "render_file": 1}).to_list(3000)
+        for c in done:
+            if not c.get("render_file") or not os.path.exists(c["render_file"]):
+                await db.clips.update_one({"id": c["id"]}, {"$set": {"render_status": "pending", "rendered": False, "render_file": None}})
+    except Exception as e:
+        logger.error(f"startup index/seed block failed (continuing): {e}")
+    if os.environ.get("ENABLE_AUTO_VOD", "true").lower() == "true":
+        asyncio.create_task(auto_sync_loop())
+    if os.environ.get("ENABLE_RENDER_WORKER", "true").lower() == "true":
+        asyncio.create_task(render_worker())
+    if os.environ.get("ENABLE_LIVE_MONITOR", "true").lower() == "true":
+        asyncio.create_task(live_monitor_loop())
+    if os.environ.get("ENABLE_BUFFER_WORKER", "true").lower() == "true":
+        asyncio.create_task(buffer_sync_loop())
 
 
 app.include_router(api)
