@@ -58,6 +58,7 @@ pokimane=a9defff4-626f-429f-a606-fcc8f5c788cd.
 - P3: Stream `get_clip_video` instead of reading whole file into memory (fine at 30fps sizes now).
 
 ## Notes for next agent
-- NO Twitch OAuth. NO user login. Keep ffmpeg CPU throttling (removing it → Cloudflare 502s).
+- CRITICAL CPU RULE (root cause of recurring Cloudflare "unparseable/empty response" on add/any request): the pod is HARD-CAPPED at 2 CPUs (`cpu.max = 200000 100000`). Rendering MUST stay throttled: `RENDER_SEM = asyncio.Semaphore(1)`, `render_worker` must `await render_clip_to_store(...)` serially (NEVER `create_task`), and every ffmpeg is launched via `taskset -c $RENDER_CPUS(=0) nice -n 19 ...` with `-threads 1`, `-filter_complex_threads 1`, and `-x264-params threads=1:lookahead-threads=1:sliced-threads=0`. This pins one render to ≤1 CPU, leaving a full CPU for uvicorn (verified: API ~0.14s during render). Do NOT raise the semaphore or drop taskset — it instantly starves the web server.
+- NO Twitch OAuth for the original flow. NOTE: a later refactor made add_channel/live/vods use the Helix API (requires Twitch client_id/secret in Settings); VOD playback still uses public GQL.
 - Test /video by prepare→poll render_status=done→GET /video (avoids CF 100s edge timeout).
-- The 3 channels are real (is_demo=false); demo seed concept is effectively deprecated.
+- The 3 channels are real (is_demo removed); demo seed concept is deprecated.

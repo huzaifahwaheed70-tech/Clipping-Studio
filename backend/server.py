@@ -732,7 +732,8 @@ os.makedirs(RENDER_DIR, exist_ok=True)
 
 async def _make_poster(video_path: str, out: str):
     try:
-        args = ["nice", "-n", "19", "ffmpeg", "-y", "-i", video_path,
+        args = ["taskset", "-c", os.environ.get("RENDER_CPUS", "0"),
+                "nice", "-n", "19", "ffmpeg", "-y", "-i", video_path,
                 "-ss", "1", "-frames:v", "1", "-q:v", "4", "-threads", "1", out]
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -1344,6 +1345,7 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
         out_label = "[vout]"
 
     args = [
+        "taskset", "-c", os.environ.get("RENDER_CPUS", "0"),
         "nice", "-n", "19",
         "ffmpeg", "-y",
         "-user_agent", "Mozilla/5.0",
@@ -1355,8 +1357,10 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
         args += ["-t", str(duration)]
     args += [
         "-filter_complex", fc,
+        "-filter_complex_threads", "1",
         "-map", out_label, "-map", "0:a?",
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-x264-params", "threads=1:lookahead-threads=1:sliced-threads=0",
         "-c:a", "aac", "-b:a", "160k",
         "-r", "30",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart",
@@ -1376,7 +1380,7 @@ async def render_vertical(src: str, out: str, caption: str, overlay: dict, workd
 
 RENDER_DIR = "/tmp/renders"
 os.makedirs(RENDER_DIR, exist_ok=True)
-RENDER_SEM = asyncio.Semaphore(3)
+RENDER_SEM = asyncio.Semaphore(1)
 
 
 async def render_clip_to_store(clip_id: str):
@@ -1505,7 +1509,8 @@ async def _run_render_job(job_id: str, clip: dict):
                 "status": "error", "error": "Couldn't find a downloadable video file for this clip."}})
             return
         out = os.path.join(RENDER_DIR, f"{job_id}.mp4")
-        await render_vertical(mp4, out, clip.get("ai_caption", ""), clip.get("caption_overlay", DEFAULT_OVERLAY), workdir)
+        async with RENDER_SEM:
+            await render_vertical(mp4, out, clip.get("ai_caption", ""), clip.get("caption_overlay", DEFAULT_OVERLAY), workdir)
         await db.render_jobs.update_one({"id": job_id}, {"$set": {"status": "done", "file": out}})
     except Exception as e:
         logger.warning(f"render job {job_id} failed: {e}")
@@ -1632,7 +1637,10 @@ async def render_worker():
         try:
             clip = await db.clips.find_one({"render_status": "pending"}, {"_id": 0})
             if clip:
-                asyncio.create_task(render_clip_to_store(clip["id"]))
+                # Render serially (await, NOT create_task) so only ONE ffmpeg ever runs.
+                # The pod is hard-capped at 2 CPUs; parallel renders starve the web server
+                # and make Cloudflare return unparseable/empty responses.
+                await render_clip_to_store(clip["id"])
                 await asyncio.sleep(1)
             else:
                 await asyncio.sleep(8)
